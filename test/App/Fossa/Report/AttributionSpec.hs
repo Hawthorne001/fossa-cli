@@ -3,7 +3,7 @@ module App.Fossa.Report.AttributionSpec (
 ) where
 
 import App.Fossa.Report.Attribution
-import Control.Applicative (liftA2)
+import Control.Applicative qualified as Ap
 import Data.Aeson
 import Data.Map.Strict (Map)
 import Data.Text (Text)
@@ -17,8 +17,8 @@ defaultRange = Range.linear 0 50
 
 genLicense :: Gen License
 genLicense =
-  License
-    <$> (LicenseName <$> arbitraryText)
+  License . LicenseName
+    <$> arbitraryText
     <*> Gen.maybe (LicenseContents <$> arbitraryText)
 
 genProject :: Gen Project
@@ -52,7 +52,7 @@ genAttribution =
     <*> Gen.maybe genCopyrightMap
 
 tuplify :: Monad m => m a -> m b -> m (a, b)
-tuplify = liftA2 (,)
+tuplify = Ap.liftA2 (,)
 
 genLicenseMap :: Gen (Map LicenseName LicenseContents)
 genLicenseMap = do

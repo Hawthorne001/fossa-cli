@@ -3,7 +3,7 @@ current_dir := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 FMT_OPTS := -co -XTypeApplications -o -XImportQualifiedPost
 FIND_OPTS := src test integration-test -type f -name '*.hs'
-GHC_VERSION := 9.4.7
+GHC_VERSION := 9.8.2
 DEV_TOOLS := ghcr.io/fossas/haskell-dev-tools:${GHC_VERSION}
 MOUNTED_DEV_TOOLS_OPTS := --rm
 MOUNTED_DEV_TOOLS_OPTS += --mount "type=bind,source=${current_dir},target=/fossa-cli"
@@ -26,7 +26,7 @@ build-cargo:
 # 	make test ARGS="Node.PackageLockV3"
 test: test-cargo test-cabal
 
-test-cabal:
+test-cabal: build-cargo
 ifdef ARGS
 	cabal test unit-tests --test-show-details=streaming --test-option=--format=checks --test-option=--times --test-option=--color --test-option=--match --test-option="$(ARGS)"
 else
@@ -121,6 +121,10 @@ lint-cargo:
 	@echo "Running clippy"
 	@cargo clippy -V
 	@cargo clippy
+
+# Build cargo deps needed b y the CLI and move them into place for cabal.
+build-embedded-rust-bins: target/release/berkeleydb target/release/millhone
+	cargo build --release --bin millhone --bin berkeleydb
 
 # Runs linter on only modified files
 # 

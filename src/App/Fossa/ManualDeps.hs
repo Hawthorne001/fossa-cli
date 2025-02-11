@@ -24,14 +24,15 @@ import App.Fossa.Config.Analyze (
   VendoredDependencyOptions (..),
  )
 import App.Fossa.Config.Common (validateFile)
+import App.Fossa.DependencyMetadata (DependencyMetadata (..))
 import App.Fossa.LicenseScanner (licenseScanSourceUnit)
 import App.Fossa.VendoredDependency (
   VendoredDependency (..),
   VendoredDependencyScanMode (..),
   arcToLocator,
   forceVendoredToArchive,
+  vendoredDependencyScanModeToDependencyRebuild,
  )
-import App.Types (FullFileUploads (..))
 import Control.Carrier.FossaApiClient (runFossaApiClient)
 import Control.Effect.Debug (Debug)
 import Control.Effect.Diagnostics (Diagnostics, context, errCtx, errHelp, fatal, fatalText)
@@ -63,7 +64,7 @@ import Effect.Exec (Exec)
 import Effect.Logger (Logger, indent, pretty, renderIt, vsep)
 import Effect.ReadFS (ReadFS, doesFileExist, readContentsJson, readContentsYaml)
 import Errata (Errata (..), errataSimple)
-import Fossa.API.Types (ApiOpts, Organization (..))
+import Fossa.API.Types (ApiOpts, Organization (..), orgFileUpload)
 import Path (Abs, Dir, File, Path, mkRelFile, (</>))
 import Path.Extra (tryMakeRelative)
 import Srclib.Converter (depTypeToFetcher)
@@ -205,6 +206,7 @@ toSourceUnit root depsFile manualDeps@ManualDependencies{..} maybeApiOpts vendor
       , sourceUnitType = "user-specific-yaml"
       , sourceUnitBuild = build
       , sourceUnitGraphBreadth = Complete
+      , sourceUnitNoticeFiles = []
       , sourceUnitOriginPaths = [someBaseToOriginPath originPath]
       , additionalData = additional
       }
@@ -225,12 +227,12 @@ scanAndUpload ::
   m (NonEmpty Locator)
 scanAndUpload root vdeps vendoredDepsOptions = do
   org <- getOrganization
-  (archiveOrCLI, vendoredDependencyScanMode) <- getScanCfg org vendoredDepsOptions
-  let fullFileUploads = FullFileUploads $ orgRequiresFullFileUploads org
+  (archiveOrCLI, mode) <- getScanCfg org vendoredDepsOptions
+  let uploadKind = orgFileUpload org
   let pathFilters = licenseScanPathFilters vendoredDepsOptions
   let scanner = case archiveOrCLI of
-        ArchiveUpload -> archiveUploadSourceUnit
-        CLILicenseScan -> licenseScanSourceUnit vendoredDependencyScanMode pathFilters fullFileUploads
+        ArchiveUpload -> archiveUploadSourceUnit $ vendoredDependencyScanModeToDependencyRebuild mode
+        CLILicenseScan -> licenseScanSourceUnit mode pathFilters uploadKind
 
   when (archiveOrCLI == ArchiveUpload && isJust pathFilters) $
     fatalText "You have provided path filters in the vendoredDependencies.licenseScanPathFilters section of your .fossa.yml file. Path filters are not allowed when doing archive uploads."
@@ -385,12 +387,6 @@ data RemoteDependency = RemoteDependency
   }
   deriving (Eq, Ord, Show)
 
-data DependencyMetadata = DependencyMetadata
-  { depDescription :: Maybe Text
-  , depHomepage :: Maybe Text
-  }
-  deriving (Eq, Ord, Show)
-
 instance FromJSON ManualDependencies where
   parseJSON (Object obj) =
     ManualDependencies
@@ -523,8 +519,7 @@ instance FromJSON RemoteDependency where
       <$> (obj `neText` "name")
       <*> (unTextLike <$> obj `neText` "version")
       <*> (obj `neText` "url")
-      <*> obj
-        .:? "metadata"
+      <*> obj .:? "metadata"
       <* forbidMembers "remote dependencies" ["license", "path", "type"] obj
 
 validateRemoteDep :: (Has Diagnostics sig m) => RemoteDependency -> Organization -> m RemoteDependency
@@ -577,16 +572,6 @@ instance ToDiagnostic RemoteDepLengthIsGtThanAllowed where
       urlRevLength = Text.length $ Text.intercalate "" [remoteUrl r, remoteVersion r]
   renderDiagnostic (RemoteDepLengthIsGtThanAllowedHelp maxLen) =
     createErrataWithHeaderOnly $ "Ensure that the combined length is below: " <> toText maxLen
-
--- Dependency "metadata" section for both Remote and Custom Dependencies
-instance FromJSON DependencyMetadata where
-  parseJSON = withObject "metadata" $ \obj ->
-    DependencyMetadata
-      <$> obj
-        .:? "description"
-      <*> obj
-        .:? "homepage"
-      <* forbidMembers "metadata" ["url"] obj
 
 -- Parse supported dependency types into their respective type or return Nothing.
 depTypeFromText :: Text -> Maybe DepType
@@ -652,4 +637,5 @@ supportedOSs =
   , "busybox"
   , "sles"
   , "fedora"
+  , "rocky"
   ]

@@ -23,10 +23,12 @@ import App.Fossa.VendoredDependency (
   compressFile,
   dedupVendoredDeps,
   forceVendoredToArchive,
+  getMetadata,
   hashFile,
   skippedDepsDebugLog,
+  vendoredDependencyScanModeToDependencyRebuild,
  )
-import App.Types (FullFileUploads)
+import App.Types (FileUpload)
 import Control.Carrier.Finally (Finally, runFinally)
 import Control.Carrier.FossaApiClient.Internal.FossaAPIV1 (renderLocatorUrl)
 import Control.Effect.Diagnostics (Diagnostics, ToDiagnostic (renderDiagnostic), context, fatal, fromMaybe, recover)
@@ -111,14 +113,14 @@ runLicenseScanOnDir ::
   ) =>
   Text ->
   Maybe LicenseScanPathFilters ->
-  FullFileUploads ->
+  FileUpload ->
   Path Abs Dir ->
   m [LicenseUnit]
-runLicenseScanOnDir pathPrefix licenseScanPathFilters fullFileUploads scanDir = do
+runLicenseScanOnDir pathPrefix licenseScanPathFilters uploadKind scanDir = do
   -- license scan the root directory
-  rootDirUnits <- withThemisAndIndex $ themisRunner pathPrefix licenseScanPathFilters fullFileUploads scanDir
+  rootDirUnits <- withThemisAndIndex $ themisRunner pathPrefix licenseScanPathFilters uploadKind scanDir
   -- recursively unpack archives and license scan them too
-  otherArchiveUnits <- runFinally $ recursivelyScanArchives pathPrefix licenseScanPathFilters fullFileUploads scanDir
+  otherArchiveUnits <- runFinally $ recursivelyScanArchives pathPrefix licenseScanPathFilters uploadKind scanDir
   -- when we scan multiple archives, we need to combine the results
   pure $ combineLicenseUnits (rootDirUnits <> otherArchiveUnits)
 
@@ -131,15 +133,15 @@ recursivelyScanArchives ::
   ) =>
   Text ->
   Maybe LicenseScanPathFilters ->
-  FullFileUploads ->
+  FileUpload ->
   Path Abs Dir ->
   m [LicenseUnit]
-recursivelyScanArchives pathPrefix licenseScanPathFilters fullFileUploads dir = flip walk' dir $
+recursivelyScanArchives pathPrefix licenseScanPathFilters uploadKind dir = flip walk' dir $
   \_ _ files -> do
     let process file unpackedDir = do
           let updatedPathPrefix = pathPrefix <> getPathPrefix dir (parent file)
-          currentDirResults <- withThemisAndIndex $ themisRunner updatedPathPrefix licenseScanPathFilters fullFileUploads unpackedDir
-          recursiveResults <- recursivelyScanArchives updatedPathPrefix licenseScanPathFilters fullFileUploads unpackedDir
+          currentDirResults <- withThemisAndIndex $ themisRunner updatedPathPrefix licenseScanPathFilters uploadKind unpackedDir
+          recursiveResults <- recursivelyScanArchives updatedPathPrefix licenseScanPathFilters uploadKind unpackedDir
           pure $ currentDirResults <> recursiveResults
     -- filter out files that match licenseScanPathFilterFileExclude. Currently, these are only created by firstPartyScanMain
     -- but it would be easy to allow customers to filter out single files too.
@@ -178,15 +180,15 @@ themisRunner ::
   ) =>
   Text ->
   Maybe LicenseScanPathFilters ->
-  FullFileUploads ->
+  FileUpload ->
   Path Abs Dir ->
   ThemisBins ->
   m [LicenseUnit]
-themisRunner pathPrefix licenseScanPathFilters fullFileUploads scanDir themisBins = runThemis themisBins pathPrefix licenseScanPathFilters fullFileUploads scanDir
+themisRunner pathPrefix licenseScanPathFilters uploadKind scanDir themisBins = runThemis themisBins pathPrefix licenseScanPathFilters uploadKind scanDir
 
-runThemis :: (Has Exec sig m, Has Diagnostics sig m) => ThemisBins -> Text -> Maybe LicenseScanPathFilters -> FullFileUploads -> Path Abs Dir -> m [LicenseUnit]
-runThemis themisBins pathPrefix licenseScanPathFilters fullFileUploads scanDir = do
-  context "Running license scan binary" $ execThemis themisBins pathPrefix scanDir $ themisFlags licenseScanPathFilters fullFileUploads
+runThemis :: (Has Exec sig m, Has Diagnostics sig m) => ThemisBins -> Text -> Maybe LicenseScanPathFilters -> FileUpload -> Path Abs Dir -> m [LicenseUnit]
+runThemis themisBins pathPrefix licenseScanPathFilters uploadKind scanDir = do
+  context "Running license scan binary" $ execThemis themisBins pathPrefix scanDir $ themisFlags licenseScanPathFilters uploadKind
 
 calculateVendoredHash :: Path Abs Dir -> Text -> Path Abs Dir -> IO Text
 calculateVendoredHash baseDir vendoredPath tmpDir = do
@@ -203,11 +205,11 @@ scanAndUploadVendoredDep ::
   ) =>
   Path Abs Dir ->
   Maybe LicenseScanPathFilters ->
-  FullFileUploads ->
+  FileUpload ->
   VendoredDependency ->
   m (Maybe Archive)
-scanAndUploadVendoredDep baseDir licenseScanPathFilters fullFileUploads vdep = context "Processing vendored dependency" $ do
-  maybeLicenseUnits <- recover $ scanVendoredDep baseDir licenseScanPathFilters fullFileUploads vdep
+scanAndUploadVendoredDep baseDir licenseScanPathFilters uploadKind vdep = context "Processing vendored dependency" $ do
+  maybeLicenseUnits <- recover $ scanVendoredDep baseDir licenseScanPathFilters uploadKind vdep
   case maybeLicenseUnits of
     Nothing -> pure Nothing
     Just licenseUnits -> uploadVendoredDep baseDir vdep licenseUnits
@@ -221,17 +223,17 @@ scanVendoredDep ::
   ) =>
   Path Abs Dir ->
   Maybe LicenseScanPathFilters ->
-  FullFileUploads ->
+  FileUpload ->
   VendoredDependency ->
   m LicenseSourceUnit
-scanVendoredDep baseDir licenseScanPathFilters fullFileUploads VendoredDependency{..} = context "Scanning vendored deps for license data" $ do
+scanVendoredDep baseDir licenseScanPathFilters uploadKind VendoredDependency{..} = context "Scanning vendored deps for license data" $ do
   logSticky $ "License Scanning '" <> vendoredName <> "' at '" <> vendoredPath <> "'"
   scanPath <- resolvePath' baseDir $ toString vendoredPath
   licenseUnits <- case scanPath of
-    SomeFile (Abs path) -> scanArchive baseDir licenseScanPathFilters fullFileUploads $ ScannableArchive path
-    SomeFile (Rel path) -> scanArchive baseDir licenseScanPathFilters fullFileUploads . ScannableArchive $ baseDir </> path
-    SomeDir (Abs path) -> scanDirectory Nothing (getPathPrefix baseDir path) licenseScanPathFilters fullFileUploads path
-    SomeDir (Rel path) -> scanDirectory Nothing (toText path) licenseScanPathFilters fullFileUploads (baseDir </> path)
+    SomeFile (Abs path) -> scanArchive baseDir licenseScanPathFilters uploadKind $ ScannableArchive path
+    SomeFile (Rel path) -> scanArchive baseDir licenseScanPathFilters uploadKind . ScannableArchive $ baseDir </> path
+    SomeDir (Abs path) -> scanDirectory Nothing (getPathPrefix baseDir path) licenseScanPathFilters uploadKind path
+    SomeDir (Rel path) -> scanDirectory Nothing (toText path) licenseScanPathFilters uploadKind (baseDir </> path)
   pure $ LicenseSourceUnit vendoredPath CliLicenseScanned licenseUnits
 
 getPathPrefix :: Path Abs Dir -> Path Abs t -> Text
@@ -249,12 +251,12 @@ scanArchive ::
   ) =>
   Path Abs Dir ->
   Maybe LicenseScanPathFilters ->
-  FullFileUploads ->
+  FileUpload ->
   ScannableArchive ->
   m (NonEmpty LicenseUnit)
-scanArchive baseDir licenseScanPathFilters fullFileUploads file = runFinally $ do
+scanArchive baseDir licenseScanPathFilters uploadKind file = runFinally $ do
   logSticky $ "scanning archive at " <> toText (scanFile file)
-  result <- withArchive' (scanFile file) (scanDirectory (Just file) pathPrefix licenseScanPathFilters fullFileUploads)
+  result <- withArchive' (scanFile file) (scanDirectory (Just file) pathPrefix licenseScanPathFilters uploadKind)
   case result of
     Left _ -> fatal . UnsupportedArchive getSourceLocation $ scanFile file
     Right r -> case r of
@@ -273,13 +275,13 @@ scanDirectory ::
   Maybe ScannableArchive ->
   Text ->
   Maybe LicenseScanPathFilters ->
-  FullFileUploads ->
+  FileUpload ->
   Path Abs Dir ->
   m (NonEmpty LicenseUnit)
-scanDirectory origin pathPrefix licenseScanPathFilters fullFileUploads path = do
+scanDirectory origin pathPrefix licenseScanPathFilters uploadKind path = do
   hasFiles <- hasAnyFiles path
   if hasFiles
-    then scanNonEmptyDirectory pathPrefix licenseScanPathFilters fullFileUploads path
+    then scanNonEmptyDirectory pathPrefix licenseScanPathFilters uploadKind path
     else maybe (fatal $ EmptyDirectory getSourceLocation path) (fatal . EmptyOrCorruptedArchive getSourceLocation . scanFile) origin
 
 hasAnyFiles ::
@@ -307,11 +309,11 @@ scanNonEmptyDirectory ::
   ) =>
   Text ->
   Maybe LicenseScanPathFilters ->
-  FullFileUploads ->
+  FileUpload ->
   Path Abs Dir ->
   m (NonEmpty LicenseUnit)
-scanNonEmptyDirectory pathPrefix licenseScanPathFilters fullFileUploads cliScanDir = do
-  themisScanResult <- runLicenseScanOnDir pathPrefix licenseScanPathFilters fullFileUploads cliScanDir
+scanNonEmptyDirectory pathPrefix licenseScanPathFilters uploadKind cliScanDir = do
+  themisScanResult <- runLicenseScanOnDir pathPrefix licenseScanPathFilters uploadKind cliScanDir
   case NE.nonEmpty themisScanResult of
     Nothing -> fatal $ NoLicenseResults getSourceLocation cliScanDir
     Just results -> pure results
@@ -326,7 +328,7 @@ uploadVendoredDep ::
   VendoredDependency ->
   LicenseSourceUnit ->
   m (Maybe Archive)
-uploadVendoredDep baseDir VendoredDependency{..} licenseSourceUnit = do
+uploadVendoredDep baseDir dep@VendoredDependency{..} licenseSourceUnit = do
   depVersion <- case vendoredVersion of
     Nothing -> sendIO $ withSystemTempDir "fossa-temp" (calculateVendoredHash baseDir vendoredPath)
     Just version -> pure version
@@ -336,7 +338,7 @@ uploadVendoredDep baseDir VendoredDependency{..} licenseSourceUnit = do
   logSticky $ "Uploading license results for '" <> vendoredName <> "' to secure S3 bucket"
   uploadLicenseScanResult signedURL licenseSourceUnit
 
-  pure $ Just $ Archive vendoredName depVersion
+  pure . Just . uncurry (Archive vendoredName depVersion) $ (getMetadata dep)
 
 -- | licenseScanSourceUnit receives a list of vendored dependencies, a root path, and API settings.
 -- Using this information, it license scans each vendored dependency, uploads the license scan results and then queues a build for the dependency.
@@ -351,11 +353,11 @@ licenseScanSourceUnit ::
   ) =>
   VendoredDependencyScanMode ->
   Maybe LicenseScanPathFilters ->
-  FullFileUploads ->
+  FileUpload ->
   Path Abs Dir ->
   NonEmpty VendoredDependency ->
   m (NonEmpty Locator)
-licenseScanSourceUnit vendoredDependencyScanMode licenseScanPathFilters fullFileUploads baseDir vendoredDeps = do
+licenseScanSourceUnit skipMode licenseScanPathFilters uploadKind baseDir vendoredDeps = do
   uniqDeps <- dedupVendoredDeps vendoredDeps
 
   -- The organizationID is needed to prefix each locator name. The FOSSA API automatically prefixes the locator when queuing the build
@@ -366,15 +368,15 @@ licenseScanSourceUnit vendoredDependencyScanMode licenseScanPathFilters fullFile
   uniqDepsWithVersions <- traverse (ensureVendoredDepVersion baseDir) uniqDeps
   -- If skipping is supported, ask Core if any of these deps have already been scanned. If they have, skip scanning them.
   (needScanning, skippable) <-
-    if vendoredDependencyScanMode == SkipPreviouslyScanned
+    if skipMode == SkipPreviouslyScanned
       then findDepsThatNeedScanning uniqDepsWithVersions orgId
       else pure (NeedScanningDeps $ NE.toList uniqDepsWithVersions, SkippableDeps [])
 
-  logDebug . pretty $ skippedDepsDebugLog needScanning skippable vendoredDependencyScanMode
+  logDebug . pretty $ skippedDepsDebugLog needScanning skippable skipMode
 
   -- At this point, we have a good list of deps, so go for it.
   -- If none of the dependencies need scanning we still need to do `finalizeLicenseScan`, so keep going
-  maybeScannedArchives <- traverse (scanAndUploadVendoredDep baseDir licenseScanPathFilters fullFileUploads) (needScanningDeps needScanning)
+  maybeScannedArchives <- traverse (scanAndUploadVendoredDep baseDir licenseScanPathFilters uploadKind) (needScanningDeps needScanning)
 
   -- We need to include both scanned and skipped archives in this list so that they all get included in the build in FOSSA
   let skippedArchives = map forceVendoredToArchive $ skippableDeps skippable
@@ -382,7 +384,7 @@ licenseScanSourceUnit vendoredDependencyScanMode licenseScanPathFilters fullFile
 
   -- finalizeLicenseScan takes archives without Organization information. This orgID is appended when creating the build on the backend.
   -- We don't care about the response here because if the build has already been queued, we get a 401 response.
-  finalizeLicenseScan $ ArchiveComponents (NE.toList archives) (vendoredDependencyScanMode == SkippingDisabledViaFlag) fullFileUploads
+  finalizeLicenseScan $ ArchiveComponents (NE.toList archives) (vendoredDependencyScanModeToDependencyRebuild skipMode) uploadKind
 
   let archivesWithOrganization :: OrgId -> NonEmpty Archive -> NonEmpty Archive
       archivesWithOrganization org = NE.map $ includeOrgId org

@@ -1,6 +1,6 @@
 module Strategy.Python.Poetry.Common (
   getPoetryBuildBackend,
-  toMap,
+  makePackageToLockDependencyMap,
   pyProjectDeps,
   logIgnoredDeps,
   toCanonicalName,
@@ -33,14 +33,18 @@ import Strategy.Python.Poetry.PyProject (
   PyProjectPoetry (..),
   PyProjectPoetryDetailedVersionDependency (..),
   PyProjectPoetryGitDependency (..),
+  PyProjectPoetryGroup (..),
+  PyProjectPoetryGroupDependencies (..),
   PyProjectPoetryPathDependency (..),
   PyProjectPoetryUrlDependency (..),
+  PyProjectTool (..),
+  allPoetryNonProductionDeps,
   toDependencyVersion,
  )
 
 -- | Gets build backend of pyproject.
 getPoetryBuildBackend :: PyProject -> Maybe Text
-getPoetryBuildBackend project = buildBackend <$> pyprojectBuildSystem project
+getPoetryBuildBackend project = buildBackend =<< pyprojectBuildSystem project
 
 -- | Supported pyproject dependencies.
 supportedPyProjectDep :: PoetryDependency -> Bool
@@ -63,13 +67,16 @@ logIgnoredDeps pyproject poetryLock = for_ notSupportedDepsMsgs (logDebug . pret
     notSupportedPyProjectDevDeps =
       Map.keys $
         Map.filter (not . supportedPyProjectDep) $
-          maybe Map.empty devDependencies (pyprojectPoetry pyproject)
+          allPoetryNonProductionDeps pyproject
 
     notSupportedPyProjectDeps :: [Text]
     notSupportedPyProjectDeps =
       Map.keys $
         Map.filter (not . supportedPyProjectDep) $
-          maybe Map.empty dependencies (pyprojectPoetry pyproject)
+          case pyprojectTool pyproject of
+            Nothing -> mempty
+            Just (PyProjectTool{pyprojectPoetry}) ->
+              maybe Map.empty dependencies (pyprojectPoetry)
 
 -- | Not supported poetry lock package.
 supportedPoetryLockDep :: PoetryLockPackage -> Bool
@@ -83,10 +90,41 @@ pyProjectDeps project = filter notNamedPython $ map snd allDeps
     notNamedPython = (/= "python") . dependencyName
 
     supportedDevDeps :: Map Text PoetryDependency
-    supportedDevDeps = Map.filter supportedPyProjectDep $ maybe Map.empty devDependencies (pyprojectPoetry project)
+    supportedDevDeps = Map.filter supportedPyProjectDep $ Map.unions [olderPoetryDevDeps, groupDeps]
+
+    -- These are dependencies coming from dev-dependencies table
+    -- which is pre 1.2.x style, understood by Poetry 1.0–1.2
+    olderPoetryDevDeps :: Map Text PoetryDependency
+    olderPoetryDevDeps = case pyprojectTool project of
+      Just (PyProjectTool{pyprojectPoetry}) -> maybe mempty devDependencies pyprojectPoetry
+      _ -> mempty
+
+    -- These are 'group' dependencies. All group dependencies are optional.
+    -- Due to current toml parsing library limitation (specifically implicit table parsing support)
+    -- We only support dev, and test group. We may miss other development dependencies in our findings
+    -- if they are not named under 'dev' or 'test' group. This is not ideal, but is good partial solution
+    -- as optional deps are not included in the final analysis by default.
+    --
+    -- Refs:
+    -- \* https://github.com/kowainik/tomland/issues/336
+    -- \* https://python-poetry.org/docs/managing-dependencies#dependency-groups
+    groupDeps :: Map Text PoetryDependency
+    groupDeps = case pyprojectTool project of
+      Just (PyProjectTool{pyprojectPoetry}) -> case pyprojectPoetry of
+        Just (PyProjectPoetry{pyprojectPoetryGroup}) -> case pyprojectPoetryGroup of
+          Just (PyProjectPoetryGroup{groupDev, groupTest}) -> case (groupDev, groupTest) of
+            (Just devDeps, Just testDeps) -> Map.unions [groupDependencies devDeps, groupDependencies testDeps]
+            (Just devDeps, Nothing) -> groupDependencies devDeps
+            (Nothing, Just testDeps) -> groupDependencies testDeps
+            _ -> mempty
+          _ -> mempty
+        _ -> mempty
+      _ -> mempty
 
     supportedProdDeps :: Map Text PoetryDependency
-    supportedProdDeps = Map.filter supportedPyProjectDep $ maybe Map.empty dependencies (pyprojectPoetry project)
+    supportedProdDeps = Map.filter supportedPyProjectDep $ case pyprojectTool project of
+      Just (PyProjectTool{pyprojectPoetry}) -> maybe Map.empty dependencies pyprojectPoetry
+      _ -> mempty
 
     toDependency :: [DepEnvironment] -> Map Text PoetryDependency -> Map Text Dependency
     toDependency depEnvs = Map.mapWithKey $ poetrytoDependency depEnvs
@@ -154,11 +192,20 @@ toCanonicalName :: Text -> Text
 toCanonicalName t = toLower $ replace "_" "-" (replace "." "-" t)
 
 -- | Maps poetry lock package to map of package name and associated dependency.
-toMap :: [PoetryLockPackage] -> Map.Map PackageName Dependency
-toMap pkgs = Map.fromList $ (\x -> (canonicalPkgName x, toDependency x)) <$> (filter supportedPoetryLockDep pkgs)
+makePackageToLockDependencyMap :: [PackageName] -> [PoetryLockPackage] -> Map.Map PackageName Dependency
+makePackageToLockDependencyMap prodPkgs pkgs = Map.fromList $ (\x -> (lockCanonicalPackageName x, toDependency x)) <$> (filter supportedPoetryLockDep pkgs)
   where
-    canonicalPkgName :: PoetryLockPackage -> PackageName
-    canonicalPkgName pkg = PackageName $ toCanonicalName $ unPackageName $ poetryLockPackageName pkg
+    canonicalPkgName :: PackageName -> PackageName
+    canonicalPkgName = PackageName . toCanonicalName . unPackageName
+
+    lockCanonicalPackageName :: PoetryLockPackage -> PackageName
+    lockCanonicalPackageName = canonicalPkgName . poetryLockPackageName
+
+    canonicalProdPkgNames :: Set.Set PackageName
+    canonicalProdPkgNames = Set.fromList $ map canonicalPkgName prodPkgs
+
+    isProductionDirectDep :: PoetryLockPackage -> Bool
+    isProductionDirectDep pkg = lockCanonicalPackageName pkg `Set.member` canonicalProdPkgNames
 
     toDependency :: PoetryLockPackage -> Dependency
     toDependency pkg =
@@ -167,7 +214,7 @@ toMap pkgs = Map.fromList $ (\x -> (canonicalPkgName x, toDependency x)) <$> (fi
         , dependencyName = toDepName pkg
         , dependencyVersion = toDepVersion pkg
         , dependencyLocations = toDepLocs pkg
-        , dependencyEnvironments = Set.singleton $ toDepEnvironment pkg
+        , dependencyEnvironments = pkgEnvironments pkg
         , dependencyTags = Map.empty
         }
 
@@ -200,16 +247,19 @@ toMap pkgs = Map.fromList $ (\x -> (canonicalPkgName x, toDependency x)) <$> (fi
           ref <- poetryLockPackageSourceReference lockPkgSrc
           if poetryLockPackageSourceType lockPkgSrc /= "legacy" then Just ref else Nothing
 
-    toDepEnvironment :: PoetryLockPackage -> DepEnvironment
-    toDepEnvironment pkg = case poetryLockPackageCategory pkg of
+    pkgEnvironments :: PoetryLockPackage -> Set.Set DepEnvironment
+    pkgEnvironments pkg = case poetryLockPackageCategory pkg of
+      -- If category is provided, use category to infer if dependency's environment
       Just category -> case category of
-        "dev" -> EnvDevelopment
-        "main" -> EnvProduction
-        "test" -> EnvTesting
-        other -> EnvOther other
-      Nothing -> defaultDepEnvironment
-
-    defaultDepEnvironment :: DepEnvironment
-    -- Poetry made this field optional. When not present, it defaults to `main`, which maps to `EnvProduction`.
-    -- https://github.com/python-poetry/poetry/pull/7637
-    defaultDepEnvironment = EnvProduction
+        "dev" -> Set.singleton EnvDevelopment
+        "main" -> Set.singleton EnvProduction
+        "test" -> Set.singleton EnvTesting
+        other -> Set.singleton $ EnvOther other
+      -- If category is not provided, lockfile is likely greater than __.
+      -- In this case, if the package name exists in the dependencies
+      -- list, mark as production dependency, otherwise, mark it as development dependency
+      -- -
+      -- Refer to:
+      -- \* https://github.com/python-poetry/poetry/pull/7637
+      Nothing ->
+        (if isProductionDirectDep pkg then Set.singleton EnvProduction else mempty)

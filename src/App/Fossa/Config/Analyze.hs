@@ -22,17 +22,22 @@ module App.Fossa.Config.Analyze (
   VSIModeOptions (..),
   GoDynamicTactic (..),
   StaticOnlyTactics (..),
+  WithoutDefaultFilters (..),
+  StrictMode (..),
   mkSubCommand,
   loadConfig,
   cliParser,
   mergeOpts,
   branchHelp,
+  withoutDefaultFilterParser,
 ) where
 
+import App.Docs (fossaAnalyzeDefaultFilterDocUrl)
 import App.Fossa.Config.Common (
   CacheAction (WriteOnly),
   CommonOpts (..),
   ScanDestination (..),
+  applyReleaseGroupDeprecationWarning,
   baseDirArg,
   collectApiOpts,
   collectBaseDir,
@@ -67,6 +72,7 @@ import App.Fossa.VSI.Types qualified as VSI
 import App.Types (
   BaseDir,
   FirstPartyScansFlag (..),
+  Mode (..),
   OverrideDynamicAnalysisBinary (..),
   OverrideProject (OverrideProject),
   ProjectMetadata (projectLabel),
@@ -80,7 +86,7 @@ import Control.Effect.Diagnostics (
   recover,
  )
 import Control.Effect.Lift (Lift)
-import Control.Monad (when)
+import Control.Monad (void, when)
 import Data.Aeson (ToJSON (toEncoding), defaultOptions, genericToEncoding)
 import Data.Flag (Flag, flagOpt, fromFlag)
 import Data.Map qualified as Map
@@ -97,7 +103,7 @@ import Discovery.Filters (AllFilters (AllFilters), MavenScopeFilters (MavenScope
 import Effect.Exec (
   Exec,
  )
-import Effect.Logger (Logger, Severity (SevDebug, SevInfo), logWarn, vsep)
+import Effect.Logger (Logger, Severity (SevDebug, SevInfo), logWarn, pretty, vsep)
 import Effect.ReadFS (ReadFS, getCurrentDir, resolveDir)
 import GHC.Generics (Generic)
 import Options.Applicative (
@@ -131,6 +137,7 @@ data ForceFirstPartyScans = ForceFirstPartyScans deriving (Generic)
 data ForceNoFirstPartyScans = ForceNoFirstPartyScans deriving (Generic)
 data IgnoreOrgWideCustomLicenseScanConfigs = IgnoreOrgWideCustomLicenseScanConfigs deriving (Generic)
 data StaticOnlyTactics = StaticOnlyTactics deriving (Generic)
+data StrictMode = StrictMode deriving (Generic, Show)
 
 data BinaryDiscovery = BinaryDiscovery deriving (Generic)
 data IncludeAll = IncludeAll deriving (Generic)
@@ -138,9 +145,13 @@ data JsonOutput = JsonOutput deriving (Generic)
 data NoDiscoveryExclusion = NoDiscoveryExclusion deriving (Generic)
 data UnpackArchives = UnpackArchives deriving (Generic)
 data VSIAnalysis = VSIAnalysis deriving (Generic)
+data WithoutDefaultFilters = WithoutDefaultFilters deriving (Generic)
 
 newtype IATAssertion = IATAssertion {unIATAssertion :: Maybe (Path Abs Dir)} deriving (Eq, Ord, Show, Generic)
 newtype DynamicLinkInspect = DynamicLinkInspect {unDynamicLinkInspect :: Maybe SomePath} deriving (Eq, Ord, Show, Generic)
+
+instance ToJSON WithoutDefaultFilters where
+  toEncoding = genericToEncoding defaultOptions
 
 instance ToJSON BinaryDiscovery where
   toEncoding = genericToEncoding defaultOptions
@@ -217,6 +228,8 @@ data AnalyzeCliOpts = AnalyzeCliOpts
   , analyzeIgnoreOrgWideCustomLicenseScanConfigs :: Flag IgnoreOrgWideCustomLicenseScanConfigs
   , analyzeCustomFossaDepsFile :: Maybe FilePath
   , analyzeStaticOnlyTactics :: Flag StaticOnlyTactics
+  , analyzeWithoutDefaultFilters :: Flag WithoutDefaultFilters
+  , analyzeStrictMode :: Flag StrictMode
   }
   deriving (Eq, Ord, Show)
 
@@ -254,6 +267,8 @@ data AnalyzeConfig = AnalyzeConfig
   , customFossaDepsFile :: Maybe FilePath
   , allowedTacticTypes :: AnalysisTacticTypes
   , reachabilityConfig :: ReachabilityConfig
+  , withoutDefaultFilters :: Flag WithoutDefaultFilters
+  , mode :: Mode
   }
   deriving (Eq, Ord, Show, Generic)
 
@@ -322,6 +337,8 @@ cliParser =
     <*> flagOpt IgnoreOrgWideCustomLicenseScanConfigs (applyFossaStyle <> long "ignore-org-wide-custom-license-scan-configs" <> stringToHelpDoc "Ignore custom-license scan configurations for your organization. These configurations are defined in the `Integrations` section of the Admin settings in the FOSSA web app")
     <*> optional (strOption (applyFossaStyle <> long "fossa-deps-file" <> helpDoc fossaDepsFileHelp <> metavar "FILEPATH"))
     <*> flagOpt StaticOnlyTactics (applyFossaStyle <> long "static-only-analysis" <> stringToHelpDoc "Only analyze the project using static strategies.")
+    <*> withoutDefaultFilterParser fossaAnalyzeDefaultFilterDocUrl
+    <*> flagOpt StrictMode (applyFossaStyle <> long "strict" <> stringToHelpDoc "Enforces strict analysis to ensure the most accurate results by rejecting fallbacks.")
   where
     fossaDepsFileHelp :: Maybe (Doc AnsiStyle)
     fossaDepsFileHelp =
@@ -330,6 +347,7 @@ cliParser =
           [ "Path to fossa-deps file including filename"
           , boldItalicized "Default:" <> " fossa-deps.{yaml|yml|json}"
           ]
+
 branchHelp :: Maybe (Doc AnsiStyle)
 branchHelp =
   Just . formatDoc $
@@ -345,6 +363,17 @@ data GoDynamicTactic
 
 instance ToJSON GoDynamicTactic where
   toEncoding = genericToEncoding defaultOptions
+
+withoutDefaultFilterParser :: Text -> Parser (Flag WithoutDefaultFilters)
+withoutDefaultFilterParser docsUrl = flagOpt WithoutDefaultFilters (applyFossaStyle <> long "without-default-filters" <> helpDoc helpMsg)
+  where
+    helpMsg :: Maybe (Doc AnsiStyle)
+    helpMsg =
+      Just . formatDoc $
+        vsep
+          [ "Ignores default filters."
+          , boldItalicized "Docs: " <> pretty docsUrl
+          ]
 
 experimentalUseV3GoResolver :: Parser GoDynamicTactic
 experimentalUseV3GoResolver =
@@ -477,7 +506,7 @@ mergeStandardOpts maybeConfig envvars cliOpts@AnalyzeCliOpts{..} = do
       revisionData =
         collectRevisionData' basedir maybeConfig WriteOnly $
           OverrideProject (optProjectName commons) (optProjectRevision commons) (analyzeBranch)
-      modeOpts = collectModeOptions cliOpts
+      vsiModeOpts = collectVsiModeOptions cliOpts
       filters = collectFilters maybeConfig cliOpts
       mavenScopeFilters = collectMavenScopeFilters maybeConfig
       experimentalCfgs = collectExperimental maybeConfig cliOpts
@@ -490,6 +519,10 @@ mergeStandardOpts maybeConfig envvars cliOpts@AnalyzeCliOpts{..} = do
           then StaticOnly
           else Any
       reachabilityConfig = collectReachabilityOptions maybeConfig
+      mode =
+        if fromFlag StrictMode analyzeStrictMode
+          then Strict
+          else NonStrict
 
   firstPartyScansFlag <-
     case (fromFlag ForceFirstPartyScans analyzeForceFirstPartyScans, fromFlag ForceNoFirstPartyScans analyzeForceNoFirstPartyScans) of
@@ -503,7 +536,7 @@ mergeStandardOpts maybeConfig envvars cliOpts@AnalyzeCliOpts{..} = do
     <*> pure logSeverity
     <*> scanDestination
     <*> revisionData
-    <*> modeOpts
+    <*> vsiModeOpts
     <*> filters
     <*> mavenScopeFilters
     <*> pure experimentalCfgs
@@ -518,10 +551,11 @@ mergeStandardOpts maybeConfig envvars cliOpts@AnalyzeCliOpts{..} = do
     <*> pure customFossaDepsFile
     <*> pure allowedTacticType
     <*> resolveReachabilityOptions reachabilityConfig
+    <*> pure analyzeWithoutDefaultFilters
+    <*> pure mode
 
 collectMavenScopeFilters ::
-  ( Has Diagnostics sig m
-  ) =>
+  (Has Diagnostics sig m) =>
   Maybe ConfigFile ->
   m MavenScopeFilters
 collectMavenScopeFilters maybeConfig =
@@ -562,8 +596,7 @@ collectExperimental maybeCfg AnalyzeCliOpts{analyzeDynamicGoAnalysisType = goDyn
     shouldAnalyzePathDependencies
 
 collectVendoredDeps ::
-  ( Has Diagnostics sig m
-  ) =>
+  (Has Diagnostics sig m) =>
   Maybe ConfigFile ->
   AnalyzeCliOpts ->
   m VendoredDependencyOptions
@@ -604,8 +637,7 @@ configGrepToGrep :: ConfigGrepEntry -> GrepEntry
 configGrepToGrep configGrep = GrepEntry (configGrepMatchCriteria configGrep) (configGrepName configGrep)
 
 collectScanDestination ::
-  ( Has Diagnostics sig m
-  ) =>
+  (Has Diagnostics sig m) =>
   Maybe ConfigFile ->
   EnvVars ->
   AnalyzeCliOpts ->
@@ -616,17 +648,18 @@ collectScanDestination maybeCfgFile envvars AnalyzeCliOpts{..} =
     else do
       apiOpts <- collectApiOpts maybeCfgFile envvars commons
       metaMerged <- maybe (pure analyzeMetadata) (mergeFileCmdMetadata analyzeMetadata) (maybeCfgFile)
+      void $ applyReleaseGroupDeprecationWarning metaMerged
       when (length (projectLabel metaMerged) > 5) $ fatalText "Projects are only allowed to have 5 associated project labels"
       pure $ UploadScan apiOpts metaMerged
 
-collectModeOptions ::
+collectVsiModeOptions ::
   ( Has Diagnostics sig m
   , Has (Lift IO) sig m
   , Has ReadFS sig m
   ) =>
   AnalyzeCliOpts ->
   m VSIModeOptions
-collectModeOptions AnalyzeCliOpts{..} = do
+collectVsiModeOptions AnalyzeCliOpts{..} = do
   assertionDir <- traverse validateDir analyzeAssertMode
   resolvedDynamicLinkTarget <- traverse validateExists analyzeDynamicLinkTarget
   pure

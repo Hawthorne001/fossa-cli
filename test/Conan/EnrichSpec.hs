@@ -3,7 +3,7 @@
 module Conan.EnrichSpec (spec) where
 
 import App.Fossa.VendoredDependency (VendoredDependency (..))
-import App.Types (FullFileUploads (..))
+import App.Types (DependencyRebuild (DependencyRebuildReuseCache), FileUpload (..))
 import Control.Algebra (Has)
 import Control.Effect.FossaApiClient (
   FossaApiClientF (
@@ -25,7 +25,12 @@ import DepTypes (
   Dependency (..),
   VerConstraint (CEq),
  )
-import Fossa.API.Types (Archive (Archive), ArchiveComponents (..))
+import Fossa.API.Types (
+  Archive (Archive),
+  ArchiveComponents (..),
+  ArchiveDescription (..),
+  ArchiveHomePage (..),
+ )
 import Graphing (directs, edges)
 import Path (Dir, Path, Rel, mkRelDir, (</>))
 import Path.IO (getCurrentDir)
@@ -48,7 +53,7 @@ spec = do
   describe "enrich" $ do
     currDir <- runIO getCurrentDir
     let scanDir = currDir </> fixtureDir
-    let conanToArchives' root = conanToArchives root (FullFileUploads False)
+    let conanToArchives' root = conanToArchives root FileUploadMatchData
 
     it' "should transform conan dependency into archive dependency" $ do
       expectGetApiOpts
@@ -150,9 +155,9 @@ mkArchiveDep name ver loc = Dependency ArchiveType name (Just $ CEq ver) [loc]
 -- Archives
 
 archiveFoo :: Archive
-archiveFoo = mkArchive "foo" "0.0.1"
+archiveFoo = mkArchive "foo" "0.0.1" Nothing Nothing
 
-mkArchive :: Text -> Text -> Archive
+mkArchive :: Text -> Text -> Maybe ArchiveDescription -> Maybe ArchiveHomePage -> Archive
 mkArchive = Archive
 
 -- API Expectations
@@ -164,7 +169,7 @@ expectGetOrganization :: Has MockApi sig m => m ()
 expectGetOrganization = GetOrganization `alwaysReturns` Fixtures.organization
 
 expectFinalizeScan :: Has MockApi sig m => [Archive] -> m ()
-expectFinalizeScan as = (FinalizeLicenseScan ArchiveComponents{archives = as, forceRebuild = False, fullFiles = (FullFileUploads False)}) `returnsOnce` ()
+expectFinalizeScan as = flip returnsOnce () . FinalizeLicenseScan $ ArchiveComponents as DependencyRebuildReuseCache FileUploadMatchData
 
 expectGetSignedUrl :: Has MockApi sig m => PackageRevision -> m ()
 expectGetSignedUrl packageRevision = GetSignedLicenseScanUrl packageRevision `alwaysReturns` Fixtures.signedUrl
@@ -178,7 +183,7 @@ conanToVendoredDepSpec =
   describe "conanToVendoredDep" $ do
     it "should transforms conan to vendor dep, when dep has location" $ do
       let res = conanDepToVendorDep conanDepFoo
-      res `shouldBe` Right (conanDepFoo, VendoredDependency "foo" "vendored/foo" $ Just "0.0.1")
+      res `shouldBe` Right (conanDepFoo, VendoredDependency "foo" "vendored/foo" (Just "0.0.1") Nothing)
 
     it "should not transforms conan to vendor dep, when dep does not have location" $ do
       let dep = conanDepFoo{dependencyLocations = []}

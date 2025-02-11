@@ -7,6 +7,8 @@ module Fossa.API.Types (
   ApiOpts (..),
   Archive (..),
   ArchiveComponents (..),
+  ArchiveDescription (..),
+  ArchiveHomePage (..),
   Build (..),
   BuildStatus (..),
   BuildTask (..),
@@ -41,10 +43,11 @@ module Fossa.API.Types (
   useApiOpts,
   defaultApiPollDelay,
   blankOrganization,
+  orgFileUpload,
 ) where
 
 import App.Fossa.Lernie.Types (GrepEntry)
-import App.Types (FullFileUploads (..), fullFileUploadsToCliLicenseScanType)
+import App.Types (DependencyRebuild (..), FileUpload (..))
 import Control.Applicative ((<|>))
 import Control.Effect.Diagnostics (Diagnostics, Has, fatalText)
 import Control.Timeout (Duration (Seconds))
@@ -90,6 +93,8 @@ import Text.URI (URI, render)
 import Text.URI.QQ (uri)
 import Types (ArchiveUploadType (..))
 import Unsafe.Coerce qualified as Unsafe
+
+--- | Data types of CLI owned endpoints in Core
 
 newtype ApiKey = ApiKey {unApiKey :: Text}
   deriving (Eq, Ord)
@@ -138,31 +143,50 @@ instance FromJSON SignedURLWithKey where
     SignedURLWithKey <$> obj .: "signedUrl" <*> obj .: "key"
 
 data ArchiveComponents = ArchiveComponents
-  { archives :: [Archive]
-  , forceRebuild :: Bool
-  , fullFiles :: FullFileUploads
+  { archiveComponentsArchives :: [Archive]
+  , archiveComponentsRebuild :: DependencyRebuild
+  , archiveComponentsUpload :: FileUpload
   }
   deriving (Eq, Ord, Show)
 
 instance ToJSON ArchiveComponents where
   toJSON ArchiveComponents{..} =
     object
-      [ "archives" .= archives
-      , "forceRebuild" .= forceRebuild
-      , "fullFiles" .= unFullFileUploads fullFiles
+      [ "archives" .= archiveComponentsArchives
+      , "fullFiles" .= case archiveComponentsUpload of
+          FileUploadFullContent -> True
+          FileUploadMatchData -> False
+      , -- Don't use the ToJSON instance of DependencyRebuild since this endpoint has a different expectation.
+        "forceRebuild"
+          .= case archiveComponentsRebuild of
+            DependencyRebuildReuseCache -> False
+            DependencyRebuildInvalidateCache -> True
       ]
+
+newtype ArchiveDescription = ArchiveDescription Text
+  deriving (Eq, Ord, ToJSON, ToText, Show)
+
+newtype ArchiveHomePage = ArchiveHomePage Text
+  deriving (Eq, Ord, ToJSON, ToText, Show)
 
 data Archive = Archive
   { archiveName :: Text
   , archiveVersion :: Text
+  , archiveDescription :: Maybe ArchiveDescription
+  , archiveHomePage :: Maybe ArchiveHomePage
   }
   deriving (Eq, Ord, Show)
+
+instance ToText Archive where
+  toText Archive{..} = archiveName <> "@" <> archiveVersion
 
 instance ToJSON Archive where
   toJSON Archive{..} =
     object
       [ "packageSpec" .= archiveName
       , "revision" .= archiveVersion
+      , "description" .= archiveDescription
+      , "projectURL" .= archiveHomePage
       ]
 
 data BuildStatus
@@ -189,12 +213,9 @@ newtype BuildTask = BuildTask
 instance FromJSON Build where
   parseJSON = withObject "Build" $ \obj ->
     Build
-      <$> obj
-        .: "id"
-      <*> obj
-        .:? "error"
-      <*> obj
-        .: "task"
+      <$> obj .: "id"
+      <*> obj .:? "error"
+      <*> obj .: "task"
 
 instance FromJSON BuildTask where
   parseJSON = withObject "BuildTask" $ \obj ->
@@ -223,7 +244,7 @@ data Issues = Issues
 
 data IssuesSummary = IssuesSummary
   { revision :: IssueSummaryRevision
-  , targets :: Maybe [IssueSummaryTarget]
+  , targets :: [IssueSummaryTarget]
   }
   deriving (Eq, Ord, Show)
 
@@ -329,15 +350,10 @@ newtype IssueRule = IssueRule
 instance FromJSON Issues where
   parseJSON = withObject "Issues" $ \obj ->
     Issues
-      <$> obj
-        .: "count"
-      <*> obj
-        .:? "issues"
-        .!= []
-      <*> obj
-        .: "status"
-      <*> obj
-        .:? "summary"
+      <$> obj .: "count"
+      <*> obj .:? "issues" .!= []
+      <*> obj .: "status"
+      <*> obj .:? "summary"
 
 instance ToJSON Issues where
   toJSON Issues{..} =
@@ -351,10 +367,8 @@ instance ToJSON Issues where
 instance FromJSON IssuesSummary where
   parseJSON = withObject "IssuesSummary" $ \obj ->
     IssuesSummary
-      <$> obj
-        .: "revision"
-      <*> obj
-        .: "targets"
+      <$> obj .: "revision"
+      <*> obj .:? "targets" .!= []
 
 instance ToJSON IssuesSummary where
   toJSON IssuesSummary{..} =
@@ -366,12 +380,9 @@ instance ToJSON IssuesSummary where
 instance FromJSON IssueSummaryRevision where
   parseJSON = withObject "IssueSummaryRevision" $ \obj ->
     IssueSummaryRevision
-      <$> obj
-        .: "projectTitle"
-      <*> obj
-        .: "projectRevision"
-      <*> obj
-        .:? "isPublic"
+      <$> obj .: "projectTitle"
+      <*> obj .: "projectRevision"
+      <*> obj .:? "isPublic"
 
 instance ToJSON IssueSummaryRevision where
   toJSON IssueSummaryRevision{..} =
@@ -384,10 +395,8 @@ instance ToJSON IssueSummaryRevision where
 instance FromJSON IssueSummaryTarget where
   parseJSON = withObject "IssueSummaryTarget" $ \obj ->
     IssueSummaryTarget
-      <$> obj
-        .: "type"
-      <*> obj
-        .: "originPaths"
+      <$> obj .: "type"
+      <*> obj .: "originPaths"
 
 instance ToJSON IssueSummaryTarget where
   toJSON IssueSummaryTarget{..} =
@@ -399,27 +408,16 @@ instance ToJSON IssueSummaryTarget where
 instance FromJSON Issue where
   parseJSON = withObject "Issue" $ \obj ->
     Issue
-      <$> obj
-        .: "id"
-      <*> obj
-        .:? "priorityString"
-      <*> obj
-        .: "resolved"
-      <*> obj
-        .:? "revisionId"
-        .!= "unknown project"
-      <*> obj
-        .: "type"
-      <*> obj
-        .:? "rule"
-      <*> obj
-        .:? "license"
-      <*> obj
-        .:? "issueDashURL"
-      <*> obj
-        .:? "cve"
-      <*> obj
-        .:? "fixedIn"
+      <$> obj .: "id"
+      <*> obj .:? "priorityString"
+      <*> obj .: "resolved"
+      <*> obj .:? "revisionId" .!= "unknown project"
+      <*> obj .: "type"
+      <*> obj .:? "rule"
+      <*> obj .:? "license"
+      <*> obj .:? "issueDashURL"
+      <*> obj .:? "cve"
+      <*> obj .:? "fixedIn"
 
 instance ToJSON Issue where
   toJSON Issue{..} =
@@ -503,6 +501,10 @@ data Organization = Organization
   }
   deriving (Eq, Ord, Show)
 
+orgFileUpload :: Organization -> FileUpload
+orgFileUpload Organization{orgRequiresFullFileUploads = True} = FileUploadFullContent
+orgFileUpload Organization{orgRequiresFullFileUploads = False} = FileUploadMatchData
+
 blankOrganization :: Organization
 blankOrganization =
   Organization
@@ -527,53 +529,22 @@ blankOrganization =
 instance FromJSON Organization where
   parseJSON = withObject "Organization" $ \obj ->
     Organization
-      <$> obj
-        .: "organizationId"
-      <*> obj
-        .:? "usesSAML"
-        .!= False
-      <*> obj
-        .:? "supportsCliLicenseScanning"
-        .!= False
-      <*> obj
-        .:? "supportsAnalyzedRevisionsQuery"
-        .!= False
-      <*> obj
-        .:? "defaultVendoredDependencyScanType"
-        .!= CLILicenseScan
-      <*> obj
-        .:? "supportsIssueDiffs"
-        .!= False
-      <*> obj
-        .:? "supportsNativeContainerScans"
-        .!= False
-      <*> obj
-        .:? "supportsDependenciesCachePolling"
-        .!= False
-      <*> obj
-        .:? "requireFullFileUploads"
-        .!= False
-      <*> obj
-        .:? "defaultToFirstPartyScans"
-        .!= False
-      <*> obj
-        .:? "supportsPathDependency"
-        .!= False
-      <*> obj
-        .:? "supportsFirstPartyScans"
-        .!= False
-      <*> obj
-        .:? "customLicenseScanConfigs"
-        .!= []
-      <*> obj
-        .:? "supportsReachability"
-        .!= False
-      <*> obj
-        .:? "supportsPreflightChecks"
-        .!= False
-      <*> obj
-        .:? "subscription"
-        .!= Free
+      <$> obj .: "organizationId"
+      <*> obj .:? "usesSAML" .!= False
+      <*> obj .:? "supportsCliLicenseScanning" .!= False
+      <*> obj .:? "supportsAnalyzedRevisionsQuery" .!= False
+      <*> obj .:? "defaultVendoredDependencyScanType" .!= CLILicenseScan
+      <*> obj .:? "supportsIssueDiffs" .!= False
+      <*> obj .:? "supportsNativeContainerScans" .!= False
+      <*> obj .:? "supportsDependenciesCachePolling" .!= False
+      <*> obj .:? "requireFullFileUploads" .!= False
+      <*> obj .:? "defaultToFirstPartyScans" .!= False
+      <*> obj .:? "supportsPathDependency" .!= False
+      <*> obj .:? "supportsFirstPartyScans" .!= False
+      <*> obj .:? "customLicenseScanConfigs" .!= []
+      <*> obj .:? "supportsReachability" .!= False
+      <*> obj .:? "supportsPreflightChecks" .!= False
+      <*> obj .:? "subscription" .!= Free
 
 data TokenType
   = Push
@@ -586,8 +557,7 @@ newtype TokenTypeResponse = TokenTypeResponse {tokenType :: TokenType}
 instance FromJSON TokenTypeResponse where
   parseJSON = withObject "TokenTypeResponse" $ \obj ->
     TokenTypeResponse
-      <$> obj
-        .: "tokenType"
+      <$> obj .: "tokenType"
 
 instance FromJSON TokenType where
   parseJSON = withText "TokenType" $ \case
@@ -648,12 +618,9 @@ data Project = Project
 instance FromJSON Project where
   parseJSON = withObject "Project" $ \obj ->
     Project
-      <$> obj
-        .: "id"
-      <*> obj
-        .: "title"
-      <*> obj
-        .: "isMonorepo"
+      <$> obj .: "id"
+      <*> obj .: "title"
+      <*> obj .: "isMonorepo"
 
 data UploadResponse = UploadResponse
   { uploadLocator :: Locator
@@ -664,8 +631,8 @@ data UploadResponse = UploadResponse
 
 instance FromJSON UploadResponse where
   parseJSON = withObject "UploadResponse" $ \obj ->
-    UploadResponse
-      <$> (parseLocator <$> obj .: "locator")
+    UploadResponse . parseLocator
+      <$> (obj .: "locator")
       <*> obj .:? "error"
       <*> obj .:? "warnings"
 
@@ -681,8 +648,7 @@ newtype RevisionDependencyCache = RevisionDependencyCache {status :: RevisionDep
 instance FromJSON RevisionDependencyCache where
   parseJSON = withObject "RevisionDependencyCache" $ \obj ->
     RevisionDependencyCache
-      <$> obj
-        .: "status"
+      <$> obj .: "status"
 
 instance FromJSON RevisionDependencyCacheStatus where
   parseJSON = withText "RevisionDependencyCacheStatus" $ \txt -> case Text.toUpper txt of
@@ -737,14 +703,12 @@ renderedIssues issues = rendered
           , line
           ]
 
-    renderRevisionTargets :: Maybe [IssueSummaryTarget] -> Doc ann
-    renderRevisionTargets issueRevisionTargets = case issueRevisionTargets of
-      Nothing -> mempty
-      Just [] -> mempty
-      Just targets ->
-        vsep $
-          ["Project Targets:"]
-            <> map (\target -> "- " <> renderedTarget target) (sort targets)
+    renderRevisionTargets :: [IssueSummaryTarget] -> Doc ann
+    renderRevisionTargets [] = mempty
+    renderRevisionTargets targets =
+      vsep $
+        ["Project Targets:"]
+          <> map (\target -> "- " <> renderedTarget target) (sort targets)
 
     renderProjectVisibility :: Maybe Bool -> Doc ann
     renderProjectVisibility Nothing = "unknown"
@@ -827,8 +791,8 @@ renderedIssues issues = rendered
         issuePolicyConflictMessage :: Text
         issuePolicyConflictMessage =
           "Denied by policy "
-            <> fromMaybe ("(unknown policy, issueId: " <> intToText issueId <> ") ") issueLicense
-            <> "on"
+            <> fromMaybe ("(unknown policy, issueId: " <> intToText issueId <> ")") issueLicense
+            <> " on "
             <> nameRevision
 
         issueLink :: Maybe Text
@@ -876,7 +840,7 @@ data PathDependencyUploadReq = PathDependencyUploadReq
   { path :: Text
   , version :: Text
   , projectLocator :: Locator
-  , scanType :: FullFileUploads
+  , scanType :: FileUpload
   }
 
 instance ToJSON PathDependencyUploadReq where
@@ -885,7 +849,7 @@ instance ToJSON PathDependencyUploadReq where
       [ "path" .= path
       , "version" .= version
       , "projectLocator" .= projectLocator
-      , "scanType" .= fullFileUploadsToCliLicenseScanType scanType
+      , "scanType" .= scanType
       ]
 
 data PathDependencyFinalizeReq = PathDependencyFinalizeReq

@@ -14,7 +14,8 @@ import App.Fossa.Reachability.Types (SourceUnitReachability)
 import App.Fossa.Reachability.Upload (upload)
 import App.Types (
   BaseDir (BaseDir),
-  FullFileUploads (FullFileUploads),
+  FileUpload,
+  LocatorType (..),
   ProjectMetadata,
   ProjectRevision (..),
  )
@@ -61,7 +62,7 @@ import Effect.Logger (
   logStdout,
   viaShow,
  )
-import Fossa.API.Types (Organization (orgRequiresFullFileUploads, orgSupportsReachability, organizationId), Project (projectIsMonorepo), UploadResponse (..))
+import Fossa.API.Types (Organization (orgSupportsReachability, organizationId), Project (projectIsMonorepo), UploadResponse (..), orgFileUpload)
 import Path (Abs, Dir, Path)
 import Srclib.Types (
   FullSourceUnit,
@@ -69,6 +70,7 @@ import Srclib.Types (
   Locator (..),
   SourceUnit,
   licenseUnitToFullSourceUnit,
+  projectId,
   renderLocator,
   sourceUnitToFullSourceUnit,
  )
@@ -126,13 +128,11 @@ uploadSuccessfulAnalysis (BaseDir basedir) metadata jsonOutput revision scanUnit
     uploadResult <- case scanUnits of
       SourceUnitOnly units -> uploadAnalysis revision metadata units
       LicenseSourceUnitOnly licenseSourceUnit -> do
-        let fullFileUploads = FullFileUploads $ orgRequiresFullFileUploads org
         let mergedUnits = mergeSourceAndLicenseUnits [] licenseSourceUnit
-        runStickyLogger SevInfo $ uploadAnalysisWithFirstPartyLicensesToS3AndCore revision metadata mergedUnits fullFileUploads
+        runStickyLogger SevInfo . uploadAnalysisWithFirstPartyLicensesToS3AndCore revision metadata mergedUnits $ orgFileUpload org
       SourceAndLicenseUnits sourceUnits licenseSourceUnit -> do
-        let fullFileUploads = FullFileUploads $ orgRequiresFullFileUploads org
         let mergedUnits = mergeSourceAndLicenseUnits sourceUnits licenseSourceUnit
-        runStickyLogger SevInfo $ uploadAnalysisWithFirstPartyLicensesToS3AndCore revision metadata mergedUnits fullFileUploads
+        runStickyLogger SevInfo . uploadAnalysisWithFirstPartyLicensesToS3AndCore revision metadata mergedUnits $ orgFileUpload org
 
     emitBuildWarnings uploadResult
 
@@ -167,11 +167,11 @@ uploadAnalysisWithFirstPartyLicensesToS3AndCore ::
   ProjectRevision ->
   ProjectMetadata ->
   NE.NonEmpty FullSourceUnit ->
-  FullFileUploads ->
+  FileUpload ->
   m UploadResponse
-uploadAnalysisWithFirstPartyLicensesToS3AndCore revision metadata mergedUnits fullFileUploads = do
+uploadAnalysisWithFirstPartyLicensesToS3AndCore revision metadata mergedUnits uploadKind = do
   _ <- uploadAnalysisWithFirstPartyLicensesToS3 revision mergedUnits
-  uploadAnalysisWithFirstPartyLicenses revision metadata fullFileUploads
+  uploadAnalysisWithFirstPartyLicenses revision metadata uploadKind
 
 uploadAnalysisWithFirstPartyLicensesToS3 ::
   ( Has Diagnostics sig m
@@ -188,7 +188,7 @@ uploadAnalysisWithFirstPartyLicensesToS3 revision mergedUnits = do
 
 dieOnMonorepoUpload :: (Has Diagnostics sig m, Has FossaApiClient sig m) => ProjectRevision -> m ()
 dieOnMonorepoUpload revision = do
-  project <- recover $ getProject revision
+  project <- recover $ getProject revision LocatorTypeCustom
   when (maybe False projectIsMonorepo project) $
     fatalText "This project already exists as a monorepo project. Monorepo projects are no longer supported; please create a new project instead."
 
@@ -211,6 +211,7 @@ buildProjectSummary project locator projectUrl = do
   pure $
     Aeson.object
       [ "project" .= locatorProject locator
+      , "projectId" .= projectId locator
       , "revision" .= revision
       , "branch" .= projectBranch project
       , "url" .= projectUrl

@@ -51,9 +51,16 @@ module Test.Fixtures (
   invalidEditProjectPermission,
   invalidCreateProjectPermission,
   organizationWithPreflightChecks,
+  createReleaseGroupResponse,
+  releaseGroup,
+  release,
+  releaseProject,
+  policy,
+  team,
+  excludePath,
 ) where
 
-import App.Fossa.Config.Analyze (AnalysisTacticTypes (Any), AnalyzeConfig (AnalyzeConfig), ExperimentalAnalyzeConfig (..), GoDynamicTactic (..), IncludeAll (..), JsonOutput (JsonOutput), NoDiscoveryExclusion (..), ScanDestination (..), UnpackArchives (..), VSIModeOptions (..), VendoredDependencyOptions (..))
+import App.Fossa.Config.Analyze (AnalysisTacticTypes (Any), AnalyzeConfig (AnalyzeConfig), ExperimentalAnalyzeConfig (..), GoDynamicTactic (..), IncludeAll (..), JsonOutput (JsonOutput), NoDiscoveryExclusion (..), ScanDestination (..), UnpackArchives (..), VSIModeOptions (..), VendoredDependencyOptions (..), WithoutDefaultFilters (..))
 import App.Fossa.Config.Analyze qualified as ANZ
 import App.Fossa.Config.Analyze qualified as VSI
 import App.Fossa.Config.Test (DiffRevision (DiffRevision))
@@ -61,24 +68,29 @@ import App.Fossa.Lernie.Types (GrepOptions (..), OrgWideCustomLicenseConfigPolic
 import App.Fossa.Reachability.Types (CallGraphAnalysis (NoCallGraphAnalysis), SourceUnitReachability (..))
 import App.Fossa.VSI.Types qualified as VSI
 import App.Fossa.VendoredDependency (VendoredDependency (..))
-import App.Types (OverrideDynamicAnalysisBinary (..))
+import App.Types (Mode (..), OverrideDynamicAnalysisBinary (..))
 import App.Types qualified as App
 import Control.Effect.FossaApiClient qualified as App
-import Control.Monad.RWS qualified as Set
 import Control.Timeout (Duration (MilliSeconds))
 import Data.ByteString.Lazy qualified as LB
 import Data.Flag (toFlag)
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text.Encoding qualified as TL
 import Data.Text.Extra (showT)
-import Discovery.Filters (AllFilters, MavenScopeFilters (MavenScopeIncludeFilters))
+import Discovery.Filters (
+  AllFilters (AllFilters),
+  MavenScopeFilters (MavenScopeIncludeFilters),
+  comboExclude,
+ )
 import Effect.Logger (Severity (..))
+import Fossa.API.CoreTypes qualified as CoreAPI
 import Fossa.API.Types (Archive (..))
 import Fossa.API.Types qualified as API
-import Path (Abs, Dir, Path, mkAbsDir, mkRelDir, parseAbsDir, (</>))
+import Path (Abs, Dir, Path, Rel, mkAbsDir, mkRelDir, parseAbsDir, (</>))
 import Srclib.Types (LicenseScanType (..), LicenseSourceUnit (..), Locator (..), SourceUnit (..), SourceUnitBuild (..), SourceUnitDependency (..), emptyLicenseUnit)
 import System.Directory (getTemporaryDirectory)
 import Text.RawString.QQ (r)
@@ -128,6 +140,48 @@ invalidCreateTeamProjectsForReleaseGroupPermission = API.CustomBuildUploadPermis
 
 validCustomUploadPermissions :: API.CustomBuildUploadPermissions
 validCustomUploadPermissions = API.CustomBuildUploadPermissions API.ValidProjectPermission $ Just API.ValidReleaseGroupPermission
+
+createReleaseGroupResponse :: CoreAPI.CreateReleaseGroupResponse
+createReleaseGroupResponse = CoreAPI.CreateReleaseGroupResponse 1
+
+releaseGroup :: CoreAPI.ReleaseGroup
+releaseGroup =
+  CoreAPI.ReleaseGroup
+    { CoreAPI.releaseGroupId = 1
+    , CoreAPI.releaseGroupTitle = "example-title"
+    , CoreAPI.releaseGroupReleases = [release]
+    }
+
+release :: CoreAPI.ReleaseGroupRelease
+release =
+  CoreAPI.ReleaseGroupRelease
+    { CoreAPI.releaseGroupReleaseId = 2
+    , CoreAPI.releaseGroupReleaseTitle = "example-release-title"
+    , CoreAPI.releaseGroupReleaseProjects = [releaseProject]
+    }
+
+releaseProject :: CoreAPI.ReleaseProject
+releaseProject =
+  CoreAPI.ReleaseProject
+    { CoreAPI.releaseProjectLocator = "custom+1/example"
+    , CoreAPI.releaseProjectRevisionId = "custom+1/example$123"
+    , CoreAPI.releaseProjectBranch = "main"
+    }
+
+policy :: CoreAPI.Policy
+policy =
+  CoreAPI.Policy
+    { CoreAPI.policyId = 7
+    , CoreAPI.policyTitle = "example-policy"
+    , CoreAPI.policyType = CoreAPI.LICENSING
+    }
+
+team :: CoreAPI.Team
+team =
+  CoreAPI.Team
+    { CoreAPI.teamId = 10
+    , CoreAPI.teamName = "example-team"
+    }
 
 project :: API.Project
 project =
@@ -195,6 +249,7 @@ sourceUnits = [unit]
         , sourceUnitBuild = Nothing
         , sourceUnitGraphBreadth = Complete
         , sourceUnitOriginPaths = []
+        , sourceUnitNoticeFiles = []
         , additionalData = Nothing
         }
 
@@ -261,6 +316,7 @@ vsiSourceUnit =
             }
     , sourceUnitGraphBreadth = Complete
     , sourceUnitOriginPaths = ["/tmp/one/two"]
+    , sourceUnitNoticeFiles = []
     , additionalData = Nothing
     }
 
@@ -393,6 +449,7 @@ firstVendoredDep =
     "first-archive-test"
     "vendored/foo"
     (Just "0.0.1")
+    Nothing
 
 secondVendoredDep :: VendoredDependency
 secondVendoredDep =
@@ -400,6 +457,7 @@ secondVendoredDep =
     "second-archive-test"
     "vendored/bar"
     (Just "0.0.1")
+    Nothing
 
 vendoredDeps :: NonEmpty VendoredDependency
 vendoredDeps = NE.fromList [firstVendoredDep, secondVendoredDep]
@@ -426,12 +484,16 @@ firstArchive =
   Archive
     "first-archive-test"
     "0.0.1"
+    Nothing
+    Nothing
 
 secondArchive :: Archive
 secondArchive =
   Archive
     "second-archive-test"
     "0.0.1"
+    Nothing
+    Nothing
 
 archives :: [Archive]
 archives = [firstArchive, secondArchive]
@@ -456,7 +518,7 @@ vsiOptions :: VSI.VSIModeOptions
 vsiOptions =
   VSI.VSIModeOptions
     { vsiAnalysisEnabled = toFlag VSI.VSIAnalysis False
-    , vsiSkipSet = VSI.SkipResolution Set.mempty
+    , vsiSkipSet = VSI.SkipResolution Set.empty
     , iatAssertion = VSI.IATAssertion Nothing
     , dynamicLinkingTarget = VSI.DynamicLinkInspect Nothing
     , binaryDiscoveryEnabled = toFlag VSI.BinaryDiscovery False
@@ -526,6 +588,8 @@ standardAnalyzeConfig =
     , ANZ.customFossaDepsFile = customFossaDepsFile
     , ANZ.allowedTacticTypes = Any
     , ANZ.reachabilityConfig = mempty
+    , ANZ.withoutDefaultFilters = toFlag WithoutDefaultFilters False
+    , ANZ.mode = NonStrict
     }
 
 sampleJarParsedContent :: Text
@@ -548,3 +612,6 @@ M:vuln.project.sample.App:parse(java.net.URL) (M)org.dom4j.io.SAXReader:read(jav
 
 sampleJarParsedContent' :: LB.ByteString
 sampleJarParsedContent' = LB.fromStrict . TL.encodeUtf8 $ sampleJarParsedContent
+
+excludePath :: Path Rel Dir -> AllFilters
+excludePath path = AllFilters mempty $ comboExclude mempty [path]

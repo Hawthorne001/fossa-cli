@@ -29,7 +29,7 @@ module Data.Rpm.DbHeaderBlob.Internal (
   regionTagType,
 ) where
 
-import Control.Applicative (liftA2)
+import Control.Applicative qualified as Ap
 import Control.Monad (foldM, replicateM, unless, when)
 import Data.Bifunctor (bimap, first)
 import Data.Binary.Get (ByteOffset, Get, getInt32be, getWord32be, label, runGetOrFail)
@@ -308,7 +308,6 @@ readHeaderBlobTagData bs HeaderBlob{..} = do
     then -- v3 entries, these seem to be uncommon. They are distinct from > v4
     -- entries in that they don't have a specialized region for v3 data, which
     -- is why the function doesn't skip the first element of entryMetadatas
-
       bimap
         ("Failed to parse legacy index entries: " <>)
         fst
@@ -436,7 +435,7 @@ bsSubString start end = BLS.take (fromIntegral $ end - start) . BLS.drop (fromIn
 
 readEntries :: IndexCount -> Get (NonEmpty EntryMetadata)
 readEntries indexLength =
-  liftA2 (:|) readEntry $ replicateM (fromIntegral (indexLength - 1)) readEntry
+  Ap.liftA2 (:|) readEntry $ replicateM (fromIntegral (indexLength - 1)) readEntry
 
 readEntry :: Get EntryMetadata
 readEntry =

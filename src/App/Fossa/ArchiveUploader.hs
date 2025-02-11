@@ -9,8 +9,10 @@ import App.Fossa.VendoredDependency (
   arcToLocator,
   compressFile,
   dedupVendoredDeps,
+  getMetadata,
   hashFile,
  )
+import App.Types (ComponentUploadFileType (..), DependencyRebuild)
 import Control.Carrier.Diagnostics qualified as Diag
 import Control.Carrier.StickyLogger (StickyLogger, logSticky)
 import Control.Effect.Diagnostics (context)
@@ -51,7 +53,7 @@ compressAndUpload ::
   Path Abs Dir ->
   VendoredDependency ->
   m Archive
-compressAndUpload arcDir tmpDir VendoredDependency{..} = context "compressing and uploading vendored deps" $ do
+compressAndUpload arcDir tmpDir dep@VendoredDependency{..} = context "compressing and uploading vendored deps" $ do
   logSticky $ "Compressing '" <> vendoredName <> "' at '" <> vendoredPath <> "'"
   compressedFile <- sendIO $ compressFile tmpDir arcDir (toString vendoredPath)
 
@@ -59,16 +61,18 @@ compressAndUpload arcDir tmpDir VendoredDependency{..} = context "compressing an
     Nothing -> sendIO $ hashFile compressedFile
     Just version -> pure version
 
-  signedURL <- getSignedUploadUrl $ PackageRevision vendoredName depVersion
+  signedURL <- getSignedUploadUrl ArchiveUpload $ PackageRevision vendoredName depVersion
 
   logSticky $ "Uploading '" <> vendoredName <> "' to secure S3 bucket"
   res <- uploadArchive signedURL compressedFile
-  logDebug $ pretty $ show res
+  logDebug . pretty $ (decodeUtf8 @Text res)
 
-  pure $ Archive vendoredName depVersion
+  pure . uncurry (Archive vendoredName depVersion) $ (getMetadata dep)
 
 -- archiveUploadSourceUnit receives a list of vendored dependencies, a root path, and API settings.
 -- Using this information, it uploads each vendored dependency and queues a build for the dependency.
+--
+-- Note: this function intentionally does not accept a @FileUpload@ type, because it /always/ uploads full files.
 archiveUploadSourceUnit ::
   ( Has Diag.Diagnostics sig m
   , Has (Lift IO) sig m
@@ -76,10 +80,11 @@ archiveUploadSourceUnit ::
   , Has Logger sig m
   , Has FossaApiClient sig m
   ) =>
+  DependencyRebuild ->
   Path Abs Dir ->
   NonEmpty VendoredDependency ->
   m (NonEmpty Locator)
-archiveUploadSourceUnit baseDir vendoredDeps = do
+archiveUploadSourceUnit rebuild baseDir vendoredDeps = do
   uniqDeps <- dedupVendoredDeps vendoredDeps
 
   -- At this point, we have a good list of deps, so go for it.
@@ -89,9 +94,7 @@ archiveUploadSourceUnit baseDir vendoredDeps = do
   -- orgID is appended when creating the build on the backend.  We don't care
   -- about the response here because if the build has already been queued, we
   -- get a 401 response.
-  res <- traverse queueArchiveBuild (NonEmpty.toList archives)
-  logDebug $ pretty $ show res
-
+  _ <- queueArchiveBuild (NonEmpty.toList archives) rebuild
   -- The organizationID is needed to prefix each locator name. The FOSSA API
   -- automatically prefixes the locator when queuing the build but not when
   -- reading from a source unit.

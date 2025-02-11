@@ -14,6 +14,7 @@ import App.Fossa.Analyze.Project (ProjectResult)
 import App.Fossa.Config.Analyze (ExperimentalAnalyzeConfig)
 import App.Fossa.Lernie.Types (LernieResults)
 import App.Fossa.Reachability.Types (SourceUnitReachability (..))
+import App.Types (Mode)
 import Control.Effect.Debug (Debug)
 import Control.Effect.Diagnostics (Diagnostics, Has)
 import Control.Effect.Lift (Lift)
@@ -44,6 +45,7 @@ type DiscoverTaskEffs sig m =
   , Has Debug sig m
   , Has (Reader ExperimentalAnalyzeConfig) sig m
   , Has (Reader MavenScopeFilters) sig m
+  , Has (Reader Mode) sig m
   , Has (Reader AllFilters) sig m
   , Has Telemetry sig m
   )
@@ -69,6 +71,7 @@ type AnalyzeStaticTaskEffs sig m =
   , Has Debug sig m
   , Has (Reader ExperimentalAnalyzeConfig) sig m
   , Has (Reader MavenScopeFilters) sig m
+  , Has (Reader Mode) sig m
   , Has (Reader AllFilters) sig m
   , Has Telemetry sig m
   )
@@ -99,7 +102,7 @@ instance Eq SourceUnitReachabilityAttempt where
 
 data DiscoveredProjectScan
   = SkippedDueToProvidedFilter DiscoveredProjectIdentifier
-  | SkippedDueToDefaultProductionFilter DiscoveredProjectIdentifier
+  | SkippedDueToDefaultFilter DiscoveredProjectIdentifier
   | Scanned DiscoveredProjectIdentifier (Result ProjectResult)
   deriving (Show)
 
@@ -111,10 +114,10 @@ instance Eq DiscoveredProjectScan where
 
 orderByScanStatusAndType :: DiscoveredProjectScan -> DiscoveredProjectScan -> Ordering
 orderByScanStatusAndType (SkippedDueToProvidedFilter lhs) (SkippedDueToProvidedFilter rhs) = compare lhs rhs
-orderByScanStatusAndType (SkippedDueToProvidedFilter lhs) (SkippedDueToDefaultProductionFilter rhs) = compare lhs rhs
-orderByScanStatusAndType (SkippedDueToDefaultProductionFilter lhs) (SkippedDueToProvidedFilter rhs) = compare lhs rhs
-orderByScanStatusAndType (SkippedDueToDefaultProductionFilter lhs) (SkippedDueToDefaultProductionFilter rhs) = compare lhs rhs
-orderByScanStatusAndType (SkippedDueToDefaultProductionFilter _) (Scanned _ _) = GT
+orderByScanStatusAndType (SkippedDueToProvidedFilter lhs) (SkippedDueToDefaultFilter rhs) = compare lhs rhs
+orderByScanStatusAndType (SkippedDueToDefaultFilter lhs) (SkippedDueToProvidedFilter rhs) = compare lhs rhs
+orderByScanStatusAndType (SkippedDueToDefaultFilter lhs) (SkippedDueToDefaultFilter rhs) = compare lhs rhs
+orderByScanStatusAndType (SkippedDueToDefaultFilter _) (Scanned _ _) = GT
 orderByScanStatusAndType (SkippedDueToProvidedFilter _) (Scanned _ _) = GT
 orderByScanStatusAndType (Scanned lhs (Success lhsEw _)) (Scanned rhs (Success rhsEw _)) =
   case compare (length rhsEw) (length lhsEw) of

@@ -9,7 +9,7 @@ import Analysis.FixtureUtils (
  )
 import App.Fossa.LicenseScanner (scanVendoredDep)
 import App.Fossa.VendoredDependency (VendoredDependency (VendoredDependency))
-import App.Types (FullFileUploads (..))
+import App.Types (FileUpload (..))
 import Control.Carrier.Diagnostics (runDiagnostics)
 import Control.Carrier.Stack (runStack)
 import Control.Carrier.StickyLogger (ignoreStickyLogger)
@@ -46,6 +46,7 @@ vendoredDep =
     "recursive-archive-test"
     "vendor/foo.tar.gz"
     (Just "0.0.1")
+    Nothing
 
 -- the contents of the archive look like this. The `FOO_LICENSE` files contain an MIT license.
 -- `bar_apache.rb` and `something.rb` contain an Apache-2.0 license.
@@ -93,7 +94,7 @@ spec = do
     it "should find licenses in nested archives" $ do
       extractedDir <- getArtifact recursiveArchive
       let scanDir = extractedDir </> [reldir|cli-license-scan-integration-test-fixtures-main/recursive-archive|]
-      units <- runStack . runDiagnostics . ignoreStickyLogger . runExecIO . runReadFSIO . fmap licenseSourceUnitLicenseUnits $ scanVendoredDep scanDir Nothing (FullFileUploads False) vendoredDep
+      units <- runStack . runDiagnostics . ignoreStickyLogger . runExecIO . runReadFSIO . fmap licenseSourceUnitLicenseUnits $ scanVendoredDep scanDir Nothing FileUploadMatchData vendoredDep
       PIO.removeDirRecur extractedDir
       case units of
         Failure ws eg -> fail (show (renderFailure ws eg "An issue occurred"))
@@ -113,10 +114,10 @@ spec = do
             apacheUnit :: LicenseUnit
             apacheUnit = fromMaybe emptyLicenseUnit (head' $ NE.filter (\u -> licenseUnitName u == "apache-2.0") us)
 
-    it "should get full file contents from Themis if fullFileUploads is true" $ do
+    it "should get full file contents from Themis if full file uploads enabled" $ do
       extractedDir <- getArtifact recursiveArchive
       let scanDir = extractedDir </> [reldir|cli-license-scan-integration-test-fixtures-main/recursive-archive|]
-      units <- runStack . runDiagnostics . ignoreStickyLogger . runExecIO . runReadFSIO . fmap licenseSourceUnitLicenseUnits $ scanVendoredDep scanDir Nothing (FullFileUploads True) vendoredDep
+      units <- runStack . runDiagnostics . ignoreStickyLogger . runExecIO . runReadFSIO . fmap licenseSourceUnitLicenseUnits $ scanVendoredDep scanDir Nothing FileUploadFullContent vendoredDep
       PIO.removeDirRecur extractedDir
       case units of
         Failure ws eg -> fail (show (renderFailure ws eg "An issue occurred"))
@@ -140,7 +141,7 @@ spec = do
       extractedDir <- getArtifact recursiveArchive
       let scanDir = extractedDir </> [reldir|cli-license-scan-integration-test-fixtures-main/recursive-archive|]
       let licenseScanPathFilters = LicenseScanPathFilters{licenseScanPathFiltersOnly = [GlobFilter "**.rb"], licenseScanPathFiltersExclude = [], licenseScanPathFilterFileExclude = []}
-      units <- runStack . runDiagnostics . ignoreStickyLogger . runExecIO . runReadFSIO . fmap licenseSourceUnitLicenseUnits $ scanVendoredDep scanDir (Just licenseScanPathFilters) (FullFileUploads False) vendoredDep
+      units <- runStack . runDiagnostics . ignoreStickyLogger . runExecIO . runReadFSIO . fmap licenseSourceUnitLicenseUnits $ scanVendoredDep scanDir (Just licenseScanPathFilters) FileUploadMatchData vendoredDep
       PIO.removeDirRecur extractedDir
       case units of
         Failure ws eg -> fail (show (renderFailure ws eg "An issue occurred"))

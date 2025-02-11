@@ -1,5 +1,4 @@
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TemplateHaskell #-}
 
 module App.Fossa.PreflightChecks (
   PreflightCommandChecks (..),
@@ -21,16 +20,18 @@ import Control.Monad (void, when)
 import Data.Error (createErrataWithHeaderOnly)
 import Data.Text
 import Data.Text.IO qualified as TIO
+import Data.UUID qualified as UUID (toString)
+import Data.UUID.V4 qualified as UUID (nextRandom)
 import Diag.Diagnostic (ToDiagnostic (..))
 import Effect.Logger (renderIt)
 import Errata (Errata (..))
-import Fossa.API.Types (ApiOpts, CustomBuildUploadPermissions (..), Organization (..), ProjectPermissionStatus (..), ReleaseGroupPermissionStatus (..), Subscription (..), TokenType (..), TokenTypeResponse (..))
+import Fossa.API.Types (ApiOpts, CustomBuildUploadPermissions (..), Organization (..), ProjectPermissionStatus (..), ReleaseGroupPermissionStatus (..), TokenType (..), TokenTypeResponse (..))
 import Path (
   File,
   Path,
   Rel,
   fromAbsFile,
-  mkRelFile,
+  parseRelFile,
   (</>),
  )
 import Path.IO (getTempDir, removeFile)
@@ -41,27 +42,31 @@ data PreflightCommandChecks
   | ReportChecks
   | AssertUserDefinedBinariesChecks
 
+-- | Returns the Organization fetched as part of the checks.
 guardWithPreflightChecks ::
   ( Has Diagnostics sig m
   , Has (Lift IO) sig m
   ) =>
   ApiOpts ->
   PreflightCommandChecks ->
-  m ()
+  m Organization
 guardWithPreflightChecks apiOpts cmd = ignoreDebug $ runFossaApiClient apiOpts $ preflightChecks cmd
 
+-- | Returns the Organization fetched as part of the checks.
 preflightChecks ::
   ( Has Diagnostics sig m
   , Has (Lift IO) sig m
   , Has FossaApiClient sig m
   ) =>
   PreflightCommandChecks ->
-  m ()
+  m Organization
 preflightChecks cmd = context "preflight-checks" $ do
   -- Check for writing to temp dir
   tmpDir <- sendIO getTempDir
-  fatalOnIOException "Failed to write to temp directory" . sendIO $ TIO.writeFile (fromAbsFile $ tmpDir </> preflightCheckFileName) "Writing to temp dir"
-  sendIO $ removeFile (tmpDir </> preflightCheckFileName)
+  fileName <- preflightCheckFileName
+  let file = tmpDir </> fileName
+  fatalOnIOException "Failed to write to temp directory" . sendIO $ TIO.writeFile (fromAbsFile file) "Writing to temp dir"
+  sendIO $ removeFile file
 
   -- Check for valid API Key and if user can connect to fossa app
   org <- errHelp InvalidApiKeyErr $ errDoc apiKeyUrl getOrganization
@@ -76,8 +81,8 @@ preflightChecks cmd = context "preflight-checks" $ do
           ReportChecks -> do
             tokenType <- getTokenType
             fullAccessTokenCheck tokenType
-            premiumSubscriptionCheck org
           _ -> pure ()
+  pure org
 
 uploadBuildPermissionsCheck :: Has Diagnostics sig m => CustomBuildUploadPermissions -> m ()
 uploadBuildPermissionsCheck CustomBuildUploadPermissions{..} =
@@ -110,7 +115,7 @@ uploadBuildPermissionsCheck CustomBuildUploadPermissions{..} =
             $ fatal CreateTeamProjectPermissionErr
         InvalidCreateProjectOnlyToTeamPermission ->
           errDoc fossaConfigDocsUrl
-            . errHelp ("Ensure that you have specified a team to add this project to" :: Text)
+            . errHelp ("Please specify your team name, either in .fossa.yml or using the --team option with fossa analyze." :: Text)
             $ fatal CreateProjectOnlyToTeamPermissionErr
   where
     permissionHelpMsg :: Text
@@ -125,16 +130,13 @@ fullAccessTokenCheck TokenTypeResponse{..} = case tokenType of
       $ fatal TokenTypeErr
   _ -> pure ()
 
-premiumSubscriptionCheck :: Has Diagnostics sig m => Organization -> m ()
-premiumSubscriptionCheck Organization{..} = case orgSubscription of
-  Free ->
-    errHelp ("To proceed, please upgrade your subscription" :: Text)
-      . errCtx ("You currently have a free subscription" :: Text)
-      $ fatal SubscriptionTypeErr
-  _ -> pure ()
-
-preflightCheckFileName :: Path Rel File
-preflightCheckFileName = $(mkRelFile "preflight-check.txt")
+-- | Generate a unique filename for a preflight check file.
+--
+-- The filename needs to be unique so that we don't clobber the file when multiple instances of fossa run on the same machine.
+preflightCheckFileName :: Has (Lift IO) sig m => m (Path Rel File)
+preflightCheckFileName = do
+  suffix <- sendIO $ UUID.toString <$> UUID.nextRandom
+  sendIO $ parseRelFile $ "preflight-check-" <> suffix <> ".txt"
 
 data InvalidApiKeyErr = InvalidApiKeyErr
 instance ToDiagnostic InvalidApiKeyErr where
@@ -148,12 +150,6 @@ instance ToDiagnostic TokenTypeErr where
   renderDiagnostic TokenTypeErr =
     Errata (Just "Invalid API token type") [] $ Just "The action you are trying to perform requires a `Full Access` API token"
 
-data SubscriptionTypeErr = SubscriptionTypeErr
-instance ToDiagnostic SubscriptionTypeErr where
-  renderDiagnostic :: SubscriptionTypeErr -> Errata
-  renderDiagnostic SubscriptionTypeErr =
-    Errata (Just "Invalid subscription type") [] $ Just "The action you are trying to perform requires a premium subscription"
-
 projectPermissionErrHeader :: Text
 projectPermissionErrHeader = "Invalid project permission"
 
@@ -166,13 +162,13 @@ data ProjectPermissionErr
 instance ToDiagnostic ProjectPermissionErr where
   renderDiagnostic :: ProjectPermissionErr -> Errata
   renderDiagnostic CreateProjectPermissionErr =
-    Errata (Just projectPermissionErrHeader) [] $ Just "You do not have permission to create projects for your Organization"
+    Errata (Just projectPermissionErrHeader) [] $ Just "You do not have permission to create projects for your Organization."
   renderDiagnostic EditProjectPermissionErr =
-    Errata (Just projectPermissionErrHeader) [] $ Just "You do not have permission to edit projects for your Organization"
+    Errata (Just projectPermissionErrHeader) [] $ Just "You do not have permission to edit projects for your Organization."
   renderDiagnostic CreateTeamProjectPermissionErr =
-    Errata (Just projectPermissionErrHeader) [] $ Just "You do not have permission to create projects for the specified team"
+    Errata (Just projectPermissionErrHeader) [] $ Just "You do not have permission to create projects for the specified team."
   renderDiagnostic CreateProjectOnlyToTeamPermissionErr =
-    Errata (Just projectPermissionErrHeader) [] $ Just "You only have permission to create projects for your team"
+    Errata (Just projectPermissionErrHeader) [] $ Just "You only have permission to create projects for your team(s)."
 
 releaseGroupPermissionErrHeader :: Text
 releaseGroupPermissionErrHeader = "Invalid release group permission"

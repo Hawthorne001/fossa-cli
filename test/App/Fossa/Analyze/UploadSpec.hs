@@ -4,7 +4,7 @@ module App.Fossa.Analyze.UploadSpec (spec) where
 
 import App.Fossa.Analyze.Upload (ScanUnits (..), mergeSourceAndLicenseUnits, uploadSuccessfulAnalysis)
 import App.Fossa.Config.Analyze (JsonOutput (JsonOutput))
-import App.Types (FullFileUploads (FullFileUploads))
+import App.Types (FileUpload (..), LocatorType (..))
 import Control.Algebra (Has)
 import Control.Carrier.Git (GitC)
 import Control.Carrier.Simple (interpret)
@@ -39,12 +39,12 @@ expectedLocator = uploadLocator Fixtures.uploadResponse
 
 expectGetSuccess :: Has MockApi sig m => m ()
 expectGetSuccess = do
-  GetProject Fixtures.projectRevision `alwaysReturns` Fixtures.project
+  GetProject Fixtures.projectRevision LocatorTypeCustom `alwaysReturns` Fixtures.project
   GetOrganization `alwaysReturns` Fixtures.organization
   GetApiOpts `alwaysReturns` Fixtures.apiOpts
 
 expectGetProject :: Has MockApi sig m => m ()
-expectGetProject = GetProject Fixtures.projectRevision `alwaysReturns` Fixtures.project
+expectGetProject = GetProject Fixtures.projectRevision LocatorTypeCustom `alwaysReturns` Fixtures.project
 
 expectGetOrganizationWithFullFileUploads :: Has MockApi sig m => m ()
 expectGetOrganizationWithFullFileUploads =
@@ -60,9 +60,9 @@ expectContributorUploadSuccess :: Has MockApi sig m => m ()
 expectContributorUploadSuccess =
   UploadContributors expectedLocator Fixtures.contributors `alwaysReturns` ()
 
-expectFirstPartyAnalysisUploadSuccess :: FullFileUploads -> Has MockApi sig m => m ()
-expectFirstPartyAnalysisUploadSuccess fullFileUploads = do
-  UploadAnalysisWithFirstPartyLicenses Fixtures.projectRevision Fixtures.projectMetadata fullFileUploads `alwaysReturns` Fixtures.uploadResponse
+expectFirstPartyAnalysisUploadSuccess :: FileUpload -> Has MockApi sig m => m ()
+expectFirstPartyAnalysisUploadSuccess uploadKind = do
+  UploadAnalysisWithFirstPartyLicenses Fixtures.projectRevision Fixtures.projectMetadata uploadKind `alwaysReturns` Fixtures.uploadResponse
 
 expectGetFirstPartySignedUrl :: Has MockApi sig m => PackageRevision -> m ()
 expectGetFirstPartySignedUrl packageRevision = GetSignedFirstPartyScanUrl packageRevision `alwaysReturns` Fixtures.signedUrl
@@ -88,6 +88,7 @@ expectedMergedFullSourceUnits = NE.fromList [fullSourceUnit, fullLicenseUnit]
         , fullSourceUnitFiles = Nothing
         , fullSourceUnitData = Nothing
         , fullSourceUnitInfo = Nothing
+        , fullSourceUnitNoticeFiles = []
         }
     fullLicenseUnit =
       FullSourceUnit
@@ -102,11 +103,12 @@ expectedMergedFullSourceUnits = NE.fromList [fullSourceUnit, fullLicenseUnit]
         , fullSourceUnitFiles = Just $ "" NE.:| []
         , fullSourceUnitData = Just $ emptyLicenseUnitData NE.:| []
         , fullSourceUnitInfo = Just LicenseUnitInfo{licenseUnitInfoDescription = Nothing}
+        , fullSourceUnitNoticeFiles = []
         }
 
 expectGetSuccessWithReachability :: Has MockApi sig m => m ()
 expectGetSuccessWithReachability = do
-  GetProject Fixtures.projectRevision `alwaysReturns` Fixtures.project
+  GetProject Fixtures.projectRevision LocatorTypeCustom `alwaysReturns` Fixtures.project
   GetOrganization `alwaysReturns` Fixtures.organization{orgSupportsReachability = True}
   GetApiOpts `alwaysReturns` Fixtures.apiOpts
 
@@ -178,7 +180,7 @@ uploadSuccessfulAnalysisSpec = do
         . expectFatal'
         . withGit mockGit
         $ do
-          GetProject Fixtures.projectRevision `returnsOnce` Fixtures.project{projectIsMonorepo = True}
+          GetProject Fixtures.projectRevision LocatorTypeCustom `returnsOnce` Fixtures.project{projectIsMonorepo = True}
           uploadSuccessfulAnalysis
             baseDir
             Fixtures.projectMetadata
@@ -189,7 +191,7 @@ uploadSuccessfulAnalysisSpec = do
       it' "continues if fetching the project fails"
         . withGit mockGit
         $ do
-          GetProject Fixtures.projectRevision `fails` "Mocked failure fetching project"
+          GetProject Fixtures.projectRevision LocatorTypeCustom `fails` "Mocked failure fetching project"
           expectAnalysisUploadSuccess
           expectContributorUploadSuccess
           GetOrganization `alwaysReturns` Fixtures.organization
@@ -239,7 +241,7 @@ uploadSuccessfulAnalysisSpec = do
           expectGetSuccess
           expectGetFirstPartySignedUrl PackageRevision{packageName = "testProjectName", packageVersion = "testRevision"}
           expectUploadFirstPartyDataToS3
-          expectFirstPartyAnalysisUploadSuccess $ FullFileUploads False
+          expectFirstPartyAnalysisUploadSuccess FileUploadMatchData
           expectContributorUploadSuccess
           locator <-
             uploadSuccessfulAnalysis
@@ -257,7 +259,7 @@ uploadSuccessfulAnalysisSpec = do
           expectGetSuccess
           expectGetFirstPartySignedUrl PackageRevision{packageName = "testProjectName", packageVersion = "testRevision"}
           expectUploadFirstPartyDataToS3
-          expectFirstPartyAnalysisUploadSuccess $ FullFileUploads False
+          expectFirstPartyAnalysisUploadSuccess FileUploadMatchData
           expectContributorUploadSuccess
           locator <-
             uploadSuccessfulAnalysis
@@ -277,7 +279,7 @@ uploadSuccessfulAnalysisSpec = do
           expectGetApiOpts
           expectGetFirstPartySignedUrl PackageRevision{packageName = "testProjectName", packageVersion = "testRevision"}
           expectUploadFirstPartyDataToS3
-          expectFirstPartyAnalysisUploadSuccess $ FullFileUploads True
+          expectFirstPartyAnalysisUploadSuccess FileUploadFullContent
           expectContributorUploadSuccess
           locator <-
             uploadSuccessfulAnalysis

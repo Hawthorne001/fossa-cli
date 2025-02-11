@@ -12,12 +12,13 @@ module Container.Tarball (
   filePathOf,
 ) where
 
-import Codec.Archive.Tar (
-  Entry (entryContent),
-  EntryContent (HardLink, NormalFile, SymbolicLink),
- )
 import Codec.Archive.Tar qualified as Tar
-import Codec.Archive.Tar.Entry (Entry (entryTarPath), TarPath, entryPath, fromTarPathToPosixPath)
+import Codec.Archive.Tar.Entry (
+  GenEntry (entryContent, entryTarPath),
+  GenEntryContent (HardLink, NormalFile, SymbolicLink),
+  TarPath,
+  fromTarPathToPosixPath,
+ )
 import Codec.Archive.Tar.Entry qualified as TarEntry
 import Codec.Archive.Tar.Index (TarEntryOffset, nextEntryOffset)
 import Container.Docker.ImageJson (ImageJson, decodeImageJson, getLayerIds)
@@ -26,15 +27,13 @@ import Container.Errors (ContainerImgParsingError (..))
 import Container.Types (
   ContainerFSChangeSet (InsertOrUpdate, Whiteout),
   ContainerImageRaw (ContainerImageRaw),
-  ContainerLayer (
-    ContainerLayer,
-    lastOffset,
-    layerChangeSets,
-    layerDigest
-  ),
+  ContainerLayer (..),
+  LayerPath,
+  mkLayerPath,
  )
 import Control.Algebra (Has)
 import Control.Monad (unless)
+import Data.Bifunctor (first)
 import Data.ByteString.Lazy qualified as ByteStringLazy
 import Data.Either (lefts, rights)
 import Data.FileTree.IndexFileTree (SomeFileTree, empty, insert, remove, resolveSymLinkRef, toSomePath)
@@ -60,7 +59,7 @@ data TarEntries = TarEntries
 
 -- | Parses Container Image from Tarball Byte string.
 parse :: ByteStringLazy.ByteString -> Either (NLE.NonEmpty ContainerImgParsingError) ContainerImageRaw
-parse content = case mkEntries $ Tar.read' content of
+parse content = case mkEntries $ Tar.read content of
   Left err -> Left $ NLE.singleton err
   Right te -> do
     -- Exported docker image must have
@@ -91,8 +90,12 @@ parse content = case mkEntries $ Tar.read' content of
       Right imgJson -> Right imgJson
 
     getFileContent :: TarEntries -> FilePath -> Either ContainerImgParsingError ByteStringLazy.ByteString
-    getFileContent (TarEntries te _) filepath =
-      case viewl $ Seq.filter (\(t, _) -> entryPath t == filepath && isFile t) te of
+    getFileContent (TarEntries te _) filepath = do
+      -- Filepaths may be provided in POSIX format or Windows format.
+      -- However, internally all tar paths must be POSIX.
+      -- This normalizes the passed in FilePath to match the tar library's expectations.
+      tarFilePath <- first FilePathToTarPathConversion $ TarEntry.toTarPath False filepath
+      case viewl $ Seq.filter (\(t, _) -> entryTarPath t == tarFilePath && isFile t) te of
         EmptyL -> Left $ TarballFileNotFound filepath
         (manifestEntryOffset :< _) -> case entryContent $ fst manifestEntryOffset of
           (NormalFile c _) -> Right c
@@ -142,8 +145,8 @@ mkLayer (TarEntries entries tarOffset) (layerId, layerTarball) =
     EmptyL -> Left $ TarMissingLayerTar layerTarball
     (layerTarballEntry :< _) -> case entryContent $ fst layerTarballEntry of
       (NormalFile c _) -> do
-        let rawEntries = Tar.read' c
-        case mkLayerFromOffset layerId (snd layerTarballEntry) rawEntries of
+        let rawEntries = Tar.read c
+        case mkLayerFromOffset layerId (mkLayerPath layerTarball) (snd layerTarballEntry) rawEntries of
           Left err -> Left err
           Right layer -> Right layer
 
@@ -164,10 +167,11 @@ mkLayer (TarEntries entries tarOffset) (layerId, layerTarball) =
 
 mkLayerFromOffset ::
   Text ->
+  LayerPath ->
   TarEntryOffset ->
   Tar.Entries Tar.FormatError ->
   Either ContainerImgParsingError ContainerLayer
-mkLayerFromOffset layerId imgOffset = build (ContainerLayer mempty 0 layerId)
+mkLayerFromOffset layerId layerPath imgOffset = build $ mempty{layerDigest = layerId}
   where
     build builder (Tar.Next e es) = build (addNextChangeSet imgOffset e builder) es
     build builder Tar.Done = Right builder
@@ -179,6 +183,7 @@ mkLayerFromOffset layerId imgOffset = build (ContainerLayer mempty 0 layerId)
         { layerChangeSets = updateChangeSet offset entry containerLayer
         , lastOffset = nextEntryOffset entry (lastOffset containerLayer)
         , layerDigest = layerId
+        , layerPath = Just layerPath
         }
 
     updateChangeSet :: TarEntryOffset -> Tar.Entry -> ContainerLayer -> Seq ContainerFSChangeSet
@@ -202,9 +207,9 @@ mkLayerFromOffset layerId imgOffset = build (ContainerLayer mempty 0 layerId)
         else InsertOrUpdate (filePathOf tarPath) offset
 
 mkFsFromChangeset :: (Has Logger sig m) => ContainerLayer -> m (SomeFileTree TarEntryOffset)
-mkFsFromChangeset (ContainerLayer changeSet _ layerDigest) = do
+mkFsFromChangeset ContainerLayer{layerChangeSets, layerDigest} = do
   logDebug $ "Building fs from layer " <> pretty layerDigest <> " changeset"
-  (emptyDirs, tree) <- foldlM (flip applyChangeSet) (Set.empty, empty) changeSet
+  (emptyDirs, tree) <- foldlM (flip applyChangeSet) (Set.empty, empty) layerChangeSets
 
   unless (null emptyDirs) $ do
     logWarn $

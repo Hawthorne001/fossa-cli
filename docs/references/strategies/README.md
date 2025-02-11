@@ -129,42 +129,70 @@ With this option enabled, strategies that don't offer a way to analyze staticall
 
 It is important to note that neither type of strategy has an inherent benefit when detecting dependencies. If a supported language has only a static or only a dynamic strategy, this does not mean it is less supported than a language that has both.
 
+## Strict Analysis
+
+Strict analysis enforces the use of the most accurate strategy for detecting dependencies, ensuring precise and consistent results by rejecting fallback methods that may offer less reliable detection.
+
+For example, in Maven projects, FOSSA CLI attempts analysis with the following strategy order:
+
+1. Run the [mavenplugin](../strategies/languages/maven/mavenplugin.md) strategy, which provides the most accurate dependency information.
+2. If that fails, it attempts the [treecmd](../strategies/languages/maven/treecmd.md) strategy, which parses the output of the `mvn dependency:tree` command.
+3. Finally, it falls back to the [pomxml](../strategies/languages/maven/pomxml.md) strategy, scanning pom.xml files for dependencies.
+
+However, with the `--strict` flag, only the `mavenplugin` strategy will be used. If the `mavenplugin` command fails, FOSSA will not attempt the `treecmd` or `pomxml` methods. This ensures that your Maven analysis relies solely on the most precise and validated strategy.
+
+Invoke strict analysis with the `--strict` flag when running `fossa analyze`.
+
 ### Strategies by type
 
-> If the FOSSA CLI is forced to utilize a fallback strategy, meaning it did not detect ideal results, a warning is emitted in the scan summary after running `fossa analyze`.
+> [!NOTE]
+> Dynamic strategies require a working build environment for analysis.
+>
+> If a given package manager has a dynamic strategy with a static fallback, that means the static fallback provides worse results,
+> so it is only used when the dynamic strategy fails. If the package manager only has static strategies, that means dynamic analysis
+> is not required for ideal results.
 
-| Language/Package Manager                                                                                                                        | Dynamic   | Static    | Detect Vendored Code | Primary Strategy |
-| ----------------------------------------------------------------------------------------------------------------------------------------------- | --------- | --------- | -------------------- | ---------------- |
-| [C#](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/dotnet)                                               | ✅         | ✅         | ❌                    | Dynamic          |
-| [C](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/c-cpp/c-cpp.md)                                        | :warning: | :warning: | ✅                    | None             |
-| [C++](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/c-cpp/c-cpp.md)                                      | :warning: | :warning: | ✅                    | None             |
-| [Clojure (leiningen)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/clojure/clojure.md)                  | ✅         | ❌         | ❌                    | Dynamic          |
-| [Dart (pub)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/dart/dart.md)                                 | ✅         | ✅         | ❌                    | Dynamic          |
-| [Elixer (mix)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/elixir/elixir.md)                           | ✅         | ❌         | ❌                    | Dynamic          |
-| [Erlang (rebar3)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/erlang/erlang.md)                        | ✅         | ❌         | ❌                    | Dynamic          |
-| [Fortran](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/fortran/fortran.md)                              | ❌         | ✅         | ❌                    | Static           |
-| [Go (dep)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/golang/godep.md)                                | ❌         | ✅         | ❌                    | Static           |
-| [Go (glide)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/golang/glide.md)                              | ❌         | ✅         | ❌                    | Static           |
-| [Go (gomodules)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/golang/gomodules.md)                      | ✅         | ✅         | ❌                    | Dynamic          |
-| [Gradle](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/gradle/gradle.md)                                 | ✅         | ❌         | ❌                    | Dynamic          |
-| [Haskell (cabal)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/haskell/cabal.md)                        | ✅         | ❌         | ❌                    | Dynamic          |
-| [Haskell (stack)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/haskell/stack.md)                        | ✅         | ❌         | ❌                    | Dynamic          |
-| [iOS (carthage)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/platforms/ios/carthage.md)                          | ❌         | ✅         | ❌                    | Static           |
-| [iOS (cocoapods)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/platforms/ios/cocoapods.md)                        | ❌         | ✅         | ❌                    | Static           |
-| [iOS (swift)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/platforms/ios/swift.md)                                | ❌         | ✅         | ❌                    | Static           |
-| [Maven](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/maven/maven.md)                                    | ✅         | ✅         | ❌                    | Dynamic          |
-| [NodeJS (NPM/Yarn/pnpm)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/nodejs/nodejs.md)                 | ❌         | ✅         | ❌                    | Static           |
-| [Perl](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/perl/perl.md)                                       | ❌         | ✅         | ❌                    | Static           |
-| [PHP (Composer)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/php/composer.md)                          | ❌         | ✅         | ❌                    | Static           |
-| [Python (Conda)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/python/conda.md)                          | ✅         | ✅         | ❌                    | Dynamic          |
-| [Python (Pipenv)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/python/pipenv.md)                        | ✅         | ✅         | ❌                    | Dynamic          |
-| [Python (Poetry)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/python/poetry.md)                        | ❌         | ✅         | ❌                    | Static           |
-| [Python (Pdm)](./languages/python/pdm.md)                                                                                                       | ❌         | ✅         | ❌                    | Static           |
-| [Python (setup.py/requirements.txt)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/python/setuptools.md) | ✅         | ✅         | ❌                    | Dynamic          |
-| [R (renv)](./languages/r/renv.md)                                                                                                               | ❌         | ✅         | ❌                    | Static           |
-| [Ruby (bundler)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/ruby/ruby.md)                             | ✅         | ✅         | ❌                    | Static           |
-| [Rust (cargo)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/rust/rust.md)                               | ✅         | ❌         | ❌                    | Dynamic          |
-| [Scala (sbt)](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/scala)                                       | ✅         | ❌         | ❌                    | Dynamic          |
+> [!TIP]
+> If FOSSA CLI is forced to utilize a fallback strategy, meaning it did not detect ideal results,
+> a warning is emitted in the scan summary after running `fossa analyze`.
 
-:warning:: Note that these strategies support _static_ and _dynamic_ detection differently than other strategies, and are not run by default.
-   Please make sure to check their linked documentation in the table above for more details.
+> [!WARNING]
+> "Custom" strategies work very differently than the standard package manager based analysis; read their docs for more details.
+
+| Language/Package Manager                                                                                                                        | Kind of analysis             | Detect Vendored Code |
+|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------|----------------------|
+| [C#/.NET (nuget)](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/dotnet/nuspec.md)                        | Static                       | ❌                    |
+| [C#/.NET (packagereference)](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/dotnet/packagereference.md)   | Static                       | ❌                    |
+| [C#/.NET (packagesconfig)](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/dotnet/packagesconfig.md)       | Static                       | ❌                    |
+| [C#/.NET (paket)](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/dotnet/paket.md)                         | Static                       | ❌                    |
+| [C#/.NET (projectassetsjson)](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/dotnet/projectassetsjson.md) | Static                       | ❌                    |
+| [C#/.NET (projectjson)](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/dotnet/projectjson.md)             | Static                       | ❌                    |
+| [C](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/c-cpp/c-cpp.md)                                        | Custom                       | ✅                    |
+| [C++](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/c-cpp/c-cpp.md)                                      | Custom                       | ✅                    |
+| [Clojure (leiningen)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/clojure/clojure.md)                  | Dynamic                      | ❌                    |
+| [Dart (pub)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/dart/dart.md)                                 | Dynamic with static fallback | ❌                    |
+| [Elixer (mix)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/elixir/elixir.md)                           | Dynamic                      | ❌                    |
+| [Erlang (rebar3)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/erlang/erlang.md)                        | Dynamic                      | ❌                    |
+| [Fortran](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/fortran/fortran.md)                              | Static                       | ❌                    |
+| [Go (dep)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/golang/godep.md)                                | Static                       | ❌                    |
+| [Go (glide)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/golang/glide.md)                              | Static                       | ❌                    |
+| [Go (gomodules)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/golang/gomodules.md)                      | Dynamic with static fallback | ❌                    |
+| [Gradle](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/gradle/gradle.md)                                 | Dynamic                      | ❌                    |
+| [Haskell (cabal)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/haskell/cabal.md)                        | Dynamic                      | ❌                    |
+| [Haskell (stack)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/haskell/stack.md)                        | Dynamic                      | ❌                    |
+| [iOS (carthage)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/platforms/ios/carthage.md)                          | Static                       | ❌                    |
+| [iOS (cocoapods)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/platforms/ios/cocoapods.md)                        | Static                       | ❌                    |
+| [iOS (swift)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/platforms/ios/swift.md)                                | Static                       | ❌                    |
+| [Maven](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/maven/maven.md)                                    | Dynamic with static fallback | ❌                    |
+| [NodeJS (NPM/Yarn/pnpm)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/nodejs/nodejs.md)                 | Static                       | ❌                    |
+| [Perl](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/perl/perl.md)                                       | Static                       | ❌                    |
+| [PHP (Composer)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/php/composer.md)                          | Static                       | ❌                    |
+| [Python (Conda)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/python/conda.md)                          | Dynamic with static fallback | ❌                    |
+| [Python (Pipenv)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/python/pipenv.md)                        | Dynamic with static fallback | ❌                    |
+| [Python (Poetry)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/python/poetry.md)                        | Static                       | ❌                    |
+| [Python (Pdm)](./languages/python/pdm.md)                                                                                                       | Static                       | ❌                    |
+| [Python (setup.py/requirements.txt)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/python/setuptools.md) | Dynamic with static fallback | ❌                    |
+| [R (renv)](./languages/r/renv.md)                                                                                                               | Static                       | ❌                    |
+| [Ruby (bundler)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/ruby/ruby.md)                             | Dynamic with static fallback | ❌                    |
+| [Rust (cargo)](https://github.com/fossas/fossa-cli/blob/master/docs/references/strategies/languages/rust/rust.md)                               | Dynamic                      | ❌                    |
+| [Scala (sbt)](https://github.com/fossas/fossa-cli/tree/master/docs/references/strategies/languages/scala)                                       | Dynamic                      | ❌                    |

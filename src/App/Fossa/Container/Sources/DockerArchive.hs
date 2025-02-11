@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE NamedFieldPuns #-}
 
 module App.Fossa.Container.Sources.DockerArchive (
   analyzeFromDockerArchive,
@@ -16,8 +16,10 @@ import App.Fossa.Analyze.Types (
   DiscoveredProjectIdentifier (..),
   DiscoveredProjectScan (..),
  )
-import App.Fossa.Config.Analyze (ExperimentalAnalyzeConfig (ExperimentalAnalyzeConfig), GoDynamicTactic (GoModulesBasedTactic))
+import App.Fossa.Config.Analyze (ExperimentalAnalyzeConfig (ExperimentalAnalyzeConfig), GoDynamicTactic (GoModulesBasedTactic), WithoutDefaultFilters (..))
 import App.Fossa.Container.Sources.Discovery (layerAnalyzers, renderLayerTarget)
+import App.Fossa.Container.Sources.JarAnalysis (analyzeContainerJars)
+import App.Types (Mode (..))
 import Codec.Archive.Tar.Index (TarEntryOffset)
 import Container.Docker.Manifest (getImageDigest, getRepoTags)
 import Container.OsRelease (OsInfo (nameId, version), getOsInfo)
@@ -25,11 +27,12 @@ import Container.Tarball (mkFsFromChangeset, parse)
 import Container.TarballReadFs (runTarballReadFSIO)
 import Container.Types (
   ContainerImageRaw (..),
-  ContainerLayer (layerDigest),
-  ContainerScan (ContainerScan),
+  ContainerLayer (..),
+  ContainerScan (..),
   ContainerScanImage (ContainerScanImage),
   ContainerScanImageLayer (ContainerScanImageLayer),
   baseLayer,
+  discoveredJars,
   hasOtherLayers,
   otherLayersSquashed,
  )
@@ -46,18 +49,21 @@ import Control.Carrier.TaskPool (withTaskPool)
 import Control.Concurrent (getNumCapabilities)
 import Control.Effect.AtomicCounter (AtomicCounter)
 import Control.Effect.Debug (Debug)
-import Control.Effect.Diagnostics (Diagnostics, context, fromEither, fromMaybeText)
+import Control.Effect.Diagnostics (Diagnostics, context, fromEither, fromMaybeText, warnThenRecover)
 import Control.Effect.Lift (Lift, sendIO)
 import Control.Effect.Output (Output)
 import Control.Effect.Reader (Reader)
 import Control.Effect.Stack (Stack, withEmptyStack)
 import Control.Effect.TaskPool (TaskPool)
 import Control.Effect.Telemetry (Telemetry)
-import Control.Monad (void, when)
+import Control.Monad (join, void, when)
+import Data.Bifunctor (bimap)
 import Data.ByteString.Lazy qualified as BS
 import Data.FileTree.IndexFileTree (SomeFileTree, fixedVfsRoot)
+import Data.Flag (Flag, fromFlag)
 import Data.Foldable (traverse_)
-import Data.Maybe (listToMaybe, mapMaybe)
+import Data.Map qualified as Map
+import Data.Maybe (isNothing, listToMaybe, mapMaybe)
 import Data.String.Conversion (ToString (toString))
 import Data.Text (Text)
 import Data.Text.Extra (breakOnEndAndRemove, showT)
@@ -92,11 +98,18 @@ analyzeFromDockerArchive ::
   ) =>
   Bool ->
   AllFilters ->
+  Flag WithoutDefaultFilters ->
   Path Abs File ->
   m ContainerScan
-analyzeFromDockerArchive systemDepsOnly filters tarball = do
+analyzeFromDockerArchive systemDepsOnly filters withoutDefaultFilters tarball = do
   capabilities <- sendIO getNumCapabilities
   containerTarball <- sendIO . BS.readFile $ toString tarball
+
+  observations <- warnThenRecover @Text "Error Running JAR analyzer (millhone)" $
+    do
+      logInfo "Searching for JARs in container image."
+      analyzeContainerJars tarball
+
   image <- fromEither $ parse containerTarball
 
   -- get Image Digest and Tags
@@ -107,24 +120,47 @@ analyzeFromDockerArchive systemDepsOnly filters tarball = do
   -- Analyze Base Layer
   logInfo "Analyzing Base Layer"
   baseFs <- context "Building base layer FS" $ mkFsFromChangeset $ baseLayer image
-  let baseDigest = layerDigest . baseLayer $ image
+  let imageBaseLayer = baseLayer image
+      baseDigest = layerDigest imageBaseLayer
   osInfo <-
-    context "Retrieving OS Information" $
-      runTarballReadFSIO baseFs tarball getOsInfo
+    context "Retrieving OS Information"
+      . warnThenRecover @Text "Could not retrieve OS info"
+      $ runTarballReadFSIO baseFs tarball getOsInfo
+
+  when (isNothing osInfo) $
+    logInfo "No image system information detected. System dependencies will not be included with this scan."
+
   baseUnits <-
     context "Analyzing From Base Layer" $
-      analyzeLayer systemDepsOnly filters capabilities osInfo baseFs tarball
+      analyzeLayer systemDepsOnly filters withoutDefaultFilters capabilities osInfo baseFs tarball
 
   let mkScan :: [ContainerScanImageLayer] -> ContainerScan
       mkScan layers =
         ContainerScan
-          ( ContainerScanImage
-              (nameId osInfo)
-              (version osInfo)
-              layers
-          )
-          imageDigest
-          imageTag
+          { imageData =
+              ( ContainerScanImage
+                  (nameId <$> osInfo)
+                  (version <$> osInfo)
+                  layers
+              )
+          , imageDigest
+          , imageTag
+          }
+
+  (baseObservations, otherObservations) <-
+    case (observations, layerPath imageBaseLayer) of
+      (Just observations', baseLayerPath) ->
+        pure
+          . bimap (join . Map.elems) (join . Map.elems)
+          -- If a base layer does not exist not exist, jar observations will appear in "other" layers.
+          . Map.partitionWithKey (\layerPath _ -> Just layerPath == baseLayerPath)
+          $ (discoveredJars observations')
+      _ -> do
+        logInfo "Failed to run Jar analyzer."
+        logInfo "If you were expecting JAR analysis results, run with '--debug' for more info."
+        pure ([], [])
+
+  let baseScanImageLayer = ContainerScanImageLayer baseDigest baseUnits baseObservations
 
   if hasOtherLayers image
     then do
@@ -133,13 +169,15 @@ analyzeFromDockerArchive systemDepsOnly filters tarball = do
       fs <- context "Building squashed FS from other layers" . mkFsFromChangeset $ otherLayersSquashed image
       otherUnits <-
         context "Analyzing from Other Layers" $
-          analyzeLayer systemDepsOnly filters capabilities osInfo fs tarball
-      pure $
-        mkScan
-          [ ContainerScanImageLayer baseDigest baseUnits
-          , ContainerScanImageLayer squashedDigest otherUnits
-          ]
-    else pure $ mkScan [ContainerScanImageLayer baseDigest baseUnits]
+          analyzeLayer systemDepsOnly filters withoutDefaultFilters capabilities osInfo fs tarball
+
+      let scan =
+            mkScan
+              [ baseScanImageLayer
+              , ContainerScanImageLayer squashedDigest otherUnits otherObservations
+              ]
+      pure scan
+    else pure $ mkScan [baseScanImageLayer]
 
 analyzeLayer ::
   ( Has Diagnostics sig m
@@ -151,12 +189,13 @@ analyzeLayer ::
   ) =>
   Bool ->
   AllFilters ->
+  Flag WithoutDefaultFilters ->
   Int ->
-  OsInfo ->
+  Maybe OsInfo ->
   SomeFileTree TarEntryOffset ->
   Path Abs File ->
   m [SourceUnit]
-analyzeLayer systemDepsOnly filters capabilities osInfo layerFs tarball = do
+analyzeLayer systemDepsOnly filters withoutDefaultFilters capabilities osInfo layerFs tarball = do
   toSourceUnit
     <$> (runReader filters)
       ( do
@@ -164,6 +203,7 @@ analyzeLayer systemDepsOnly filters capabilities osInfo layerFs tarball = do
             runTarballReadFSIO layerFs tarball
               . runReader noExperimental
               . runReader noMavenScopeFilters
+              . runReader NonStrict
               . Diag.context "discovery/analysis tasks"
               . runOutput @DiscoveredProjectScan
               . runStickyLogger SevInfo
@@ -171,7 +211,7 @@ analyzeLayer systemDepsOnly filters capabilities osInfo layerFs tarball = do
               . withTaskPool capabilities updateProgress
               . runAtomicCounter
               $ do
-                runAnalyzers systemDepsOnly osInfo filters
+                runAnalyzers systemDepsOnly osInfo filters withoutDefaultFilters
           pure projectResults
       )
   where
@@ -195,15 +235,16 @@ runAnalyzers ::
   , Has AtomicCounter sig m
   ) =>
   Bool ->
-  OsInfo ->
+  Maybe OsInfo ->
   AllFilters ->
+  Flag WithoutDefaultFilters ->
   m ()
-runAnalyzers systemDepsOnly osInfo filters = do
+runAnalyzers systemDepsOnly osInfo filters withoutDefaultFilters = do
   traverse_
     single
     $ layerAnalyzers osInfo systemDepsOnly
   where
-    single (DiscoverFunc f) = withDiscoveredProjects f basedir (runDependencyAnalysis basedir filters)
+    single (DiscoverFunc f) = withDiscoveredProjects f basedir (runDependencyAnalysis basedir filters withoutDefaultFilters)
     basedir = Path $ toString fixedVfsRoot
 
 runDependencyAnalysis ::
@@ -217,25 +258,28 @@ runDependencyAnalysis ::
   , Has (Output DiscoveredProjectScan) sig m
   , Has (Reader ExperimentalAnalyzeConfig) sig m
   , Has (Reader MavenScopeFilters) sig m
+  , Has (Reader Mode) sig m
   , Has (Reader AllFilters) sig m
   , Has Stack sig m
   , Has Telemetry sig m
   ) =>
   Path Abs Dir ->
   AllFilters ->
+  Flag WithoutDefaultFilters ->
   DiscoveredProject proj ->
   m ()
-runDependencyAnalysis basedir filters project@DiscoveredProject{..} = do
+runDependencyAnalysis basedir filters withoutDefaultFilters project@DiscoveredProject{projectType, projectPath, projectData} = do
   let dpi = DiscoveredProjectIdentifier projectPath projectType
-  let hasNonProductionPath = isDefaultNonProductionPath basedir projectPath
+  let hasNonProductionPath =
+        not (fromFlag WithoutDefaultFilters withoutDefaultFilters) && isDefaultNonProductionPath basedir projectPath
 
   case (applyFiltersToProject basedir filters project, hasNonProductionPath) of
     (Nothing, _) -> do
       logInfo $ "Skipping " <> pretty projectType <> " project at " <> viaShow projectPath <> ": no filters matched"
       output $ SkippedDueToProvidedFilter dpi
     (Just _, True) -> do
-      logInfo $ "Skipping " <> pretty projectType <> " project at " <> viaShow projectPath <> " (default non-production path filtering)"
-      output $ SkippedDueToDefaultProductionFilter dpi
+      logInfo $ "Skipping " <> pretty projectType <> " project at " <> viaShow projectPath <> " (default filtering)"
+      output $ SkippedDueToDefaultFilter dpi
     (Just targets, False) -> do
       logInfo $ "Analyzing " <> pretty projectType <> " project at " <> pretty (toFilePath projectPath)
       let ctxMessage = "Project Analysis: " <> showT projectType
@@ -294,7 +338,10 @@ listTargetsFromDockerArchive tarball = do
 
   logInfo "Analyzing Base Layer"
   baseFs <- context "Building Base Layer FS" $ mkFsFromChangeset $ baseLayer image
-  osInfo <- context "Retrieving OS Information" $ runTarballReadFSIO baseFs tarball getOsInfo
+  osInfo <-
+    context "Retrieving OS Information"
+      . warnThenRecover @Text "Could not retrieve OS info"
+      $ runTarballReadFSIO baseFs tarball getOsInfo
   context "Analyzing From Base Layer" $ listTargetLayer capabilities osInfo baseFs tarball "Base Layer"
 
   when (hasOtherLayers image) $ do
@@ -310,7 +357,7 @@ listTargetLayer ::
   , Has Telemetry sig m
   ) =>
   Int ->
-  OsInfo ->
+  Maybe OsInfo ->
   SomeFileTree TarEntryOffset ->
   Path Abs File ->
   Text ->
@@ -329,6 +376,7 @@ listTargetLayer capabilities osInfo layerFs tarball layerType = do
           False -- Targets are not impacted by path dependencies.
       )
     . runReader (MavenScopeIncludeFilters mempty)
+    . runReader NonStrict
     . runReader (mempty :: AllFilters)
     $ run
   where

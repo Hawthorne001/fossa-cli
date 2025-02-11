@@ -5,6 +5,7 @@ module Srclib.Types (
   SourceUnit (..),
   SourceUnitBuild (..),
   SourceUnitDependency (..),
+  SourceUnitNoticeFile (..),
   AdditionalDepData (..),
   SourceUserDefDep (..),
   SourceRemoteDep (..),
@@ -20,6 +21,7 @@ module Srclib.Types (
   renderLocator,
   parseLocator,
   pathToOriginPath,
+  projectId,
   someBaseToOriginPath,
   somePathToOriginPath,
   emptyLicenseUnit,
@@ -111,6 +113,28 @@ textToOriginPath = OriginPath . toString
 --   Manifest?: string;
 -- }
 
+data SourceUnitNoticeFile = SourceUnitNoticeFile
+  { sourceUnitNoticeFilePath :: Text
+  , sourceUnitNoticeFileContents :: Text
+  , sourceUnitNoticeFileCopyrights :: [Text]
+  }
+  deriving (Eq, Ord, Show)
+
+instance ToJSON SourceUnitNoticeFile where
+  toJSON SourceUnitNoticeFile{..} =
+    object
+      [ "path" .= sourceUnitNoticeFilePath
+      , "contents" .= sourceUnitNoticeFileContents
+      , "copyrights" .= sourceUnitNoticeFileCopyrights
+      ]
+
+instance FromJSON SourceUnitNoticeFile where
+  parseJSON = withObject "SourceUnitNoticeFile" $ \obj ->
+    SourceUnitNoticeFile
+      <$> obj .: "path"
+      <*> obj .: "contents"
+      <*> obj .:? "copyrights" .!= []
+
 data FullSourceUnit = FullSourceUnit
   { fullSourceUnitName :: Text
   , fullSourceUnitType :: Text
@@ -118,6 +142,7 @@ data FullSourceUnit = FullSourceUnit
   , fullSourceUnitManifest :: Maybe Text
   , fullSourceUnitBuild :: Maybe SourceUnitBuild
   , fullSourceUnitGraphBreadth :: GraphBreadth
+  , fullSourceUnitNoticeFiles :: [SourceUnitNoticeFile]
   , fullSourceUnitOriginPaths :: [OriginPath]
   , fullSourceUnitAdditionalData :: Maybe AdditionalDepData
   , fullSourceUnitFiles :: Maybe (NonEmpty Text)
@@ -135,6 +160,7 @@ licenseUnitToFullSourceUnit LicenseUnit{..} =
     , fullSourceUnitManifest = Nothing
     , fullSourceUnitBuild = Nothing
     , fullSourceUnitGraphBreadth = Complete
+    , fullSourceUnitNoticeFiles = licenseUnitNoticeFiles
     , fullSourceUnitOriginPaths = []
     , fullSourceUnitAdditionalData = Nothing
     , fullSourceUnitFiles = Just licenseUnitFiles
@@ -152,6 +178,7 @@ sourceUnitToFullSourceUnit SourceUnit{..} =
     , fullSourceUnitBuild = sourceUnitBuild
     , fullSourceUnitGraphBreadth = sourceUnitGraphBreadth
     , fullSourceUnitOriginPaths = sourceUnitOriginPaths
+    , fullSourceUnitNoticeFiles = sourceUnitNoticeFiles
     , fullSourceUnitAdditionalData = additionalData
     , fullSourceUnitFiles = Nothing
     , fullSourceUnitData = Nothing
@@ -168,6 +195,7 @@ instance ToJSON FullSourceUnit where
       , "Build" .= fullSourceUnitBuild
       , "GraphBreadth" .= fullSourceUnitGraphBreadth
       , "OriginPaths" .= fullSourceUnitOriginPaths
+      , "NoticeFiles" .= fullSourceUnitNoticeFiles
       , "AdditionalDependencyData" .= fullSourceUnitAdditionalData
       , "Files" .= fullSourceUnitFiles
       , "Data" .= fullSourceUnitData
@@ -203,6 +231,7 @@ data LicenseUnit = LicenseUnit
   , licenseUnitDir :: Text
   , licenseUnitFiles :: (NonEmpty Text)
   , licenseUnitData :: (NonEmpty LicenseUnitData)
+  , licenseUnitNoticeFiles :: [SourceUnitNoticeFile]
   , licenseUnitInfo :: LicenseUnitInfo
   }
   deriving (Eq, Ord, Show)
@@ -216,6 +245,7 @@ emptyLicenseUnit =
     , licenseUnitDir = ""
     , licenseUnitFiles = "" :| []
     , licenseUnitData = emptyLicenseUnitData :| []
+    , licenseUnitNoticeFiles = []
     , licenseUnitInfo = LicenseUnitInfo{licenseUnitInfoDescription = Nothing}
     }
 
@@ -234,6 +264,7 @@ instance ToJSON LicenseUnit where
       , "Dir" .= licenseUnitDir
       , "Files" .= licenseUnitFiles
       , "Data" .= licenseUnitData
+      , "NoticeFiles" .= licenseUnitNoticeFiles
       , "Info" .= licenseUnitInfo
       ]
 
@@ -246,6 +277,7 @@ instance FromJSON LicenseUnit where
       <*> obj .: "Dir"
       <*> obj .: "Files"
       <*> obj .: "Data"
+      <*> obj .:? "NoticeFiles" .!= []
       <*> obj .: "Info"
 
 newtype LicenseUnitInfo = LicenseUnitInfo
@@ -321,6 +353,7 @@ data LicenseUnitMatchData = LicenseUnitMatchData
   deriving (Eq, Ord, Show)
 
 instance ToJSON LicenseUnitMatchData where
+  toJSON :: LicenseUnitMatchData -> Value
   toJSON LicenseUnitMatchData{..} =
     object
       [ "match_string" .= licenseUnitMatchDataMatchString
@@ -348,6 +381,7 @@ data SourceUnit = SourceUnit
   -- ^ path to manifest file
   , sourceUnitBuild :: Maybe SourceUnitBuild
   , sourceUnitGraphBreadth :: GraphBreadth
+  , sourceUnitNoticeFiles :: [SourceUnitNoticeFile]
   , sourceUnitOriginPaths :: [OriginPath]
   , additionalData :: Maybe AdditionalDepData
   }
@@ -409,6 +443,11 @@ renderLocator :: Locator -> Text
 renderLocator Locator{..} =
   locatorFetcher <> "+" <> locatorProject <> "$" <> fromMaybe "" locatorRevision
 
+-- The projectId is the full locator of the project. E.g. custom+123/someProject (<fetcher>+<orgId>/<project-name>)
+projectId :: Locator -> Text
+projectId Locator{..} =
+  locatorFetcher <> "+" <> locatorProject
+
 parseLocator :: Text -> Locator
 parseLocator raw = Locator fetcher project (if Text.null revision then Nothing else Just revision)
   where
@@ -424,6 +463,7 @@ instance ToJSON SourceUnit where
       , "Manifest" .= sourceUnitManifest
       , "Build" .= sourceUnitBuild
       , "GraphBreadth" .= sourceUnitGraphBreadth
+      , "NoticeFiles" .= sourceUnitNoticeFiles
       , "OriginPaths" .= sourceUnitOriginPaths
       , "AdditionalDependencyData" .= additionalData
       ]
@@ -436,6 +476,7 @@ instance FromJSON SourceUnit where
       <*> obj .: "Manifest"
       <*> obj .:? "Build"
       <*> obj .: "GraphBreadth"
+      <*> obj .:? "NoticeFiles" .!= []
       <*> obj .: "OriginPaths"
       <*> obj .:? "AdditionalDependencyData"
 

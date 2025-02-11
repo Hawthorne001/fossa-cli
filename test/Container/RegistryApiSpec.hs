@@ -61,8 +61,7 @@ parseAuthChallengeSpec =
 
     it "should parse basic auth challenge" $
       wwwAuthenticateBasic
-        `shouldParseInto` ( BasicAuthChallenge "https://quay.io/v2/auth"
-                          )
+        `shouldParseInto` (BasicAuthChallenge "https://quay.io/v2/auth")
 
 registryApiSpec :: Spec
 registryApiSpec =
@@ -87,7 +86,7 @@ registryApiSpec =
           confDigest <- getImageConfig amd64 githubImageWithDigest
           confDigest `shouldBe'` githubImageConfigDigest
 
-        it' "should get manifest for multi-platform image (chooses target platform)" $ do
+        it' "should get manifest for multi-platform image (chooses target platform - graalvm-ce)" $ do
           confDigest <- getImageConfig amd64 githubMultiArchImage
           confDigest `shouldBe'` githubMultiArchImageConfigDigest
 
@@ -104,11 +103,11 @@ registryApiSpec =
           confDigest <- getImageConfig amd64 dhImageWithDigest
           confDigest `shouldBe'` dhImageDigest
 
-        it' "should get manifest for multi-platform image (chooses target platform)" $ do
-          confDigest <- getImageConfig arm dhMultiArchImage
-          confDigest `shouldBe'` dhMultiArchImageDigest
+        it' "should get manifest for multi-platform image (chooses target platform - grafana arm)" $ do
+          confDigest <- getImageConfig arm64 grafanaMultiArchImage
+          confDigest `shouldBe'` grafanaMultiArchImageDigest
 
-        it' "should get manifest for multi-platform images (chooses target platform)" $ do
+        it' "should get manifest for multi-platform images (chooses target platform -  redis arm64)" $ do
           redisDigest <- getImageConfig arm64 redisImage
           redisDigest `shouldBe'` redisImageDigest
 
@@ -117,9 +116,6 @@ amd64 = "amd64"
 
 arm64 :: Text
 arm64 = "arm64"
-
-arm :: Text
-arm = "arm"
 
 githubImage :: Text
 githubImage = "ghcr.io/fossas/haskell-dev-tools:8.10.4"
@@ -151,12 +147,12 @@ dhImageWithDigest :: Text
 dhImageWithDigest =
   "amazon/aws-cli@sha256:7a27c26c2937a3d0b84171675709df1dc09aa331e86cad90f74ada6df7b59c89"
 
-dhMultiArchImage :: Text
-dhMultiArchImage = "grafana/grafana:8.1.7-ubuntu"
+grafanaMultiArchImage :: Text
+grafanaMultiArchImage = "grafana/grafana:8.1.7-ubuntu"
 
-dhMultiArchImageDigest :: RepoDigest
-dhMultiArchImageDigest =
-  RepoDigest "sha256:86618e1e78e4962b5abec6cc7fabe89010ebfbbf0885cbba1aada7287457c263"
+grafanaMultiArchImageDigest :: RepoDigest
+grafanaMultiArchImageDigest =
+  RepoDigest "sha256:ce1398ea33a7afcbc577e417d1a499aeeba6b5be732a2336995916406c913833"
 
 mcrRegistryImage :: Text
 mcrRegistryImage = "mcr.microsoft.com/azure-cli:0.10.13"
@@ -174,7 +170,7 @@ redisImage :: Text
 redisImage = "redis:6.0.14-buster"
 
 redisImageDigest :: RepoDigest
-redisImageDigest = RepoDigest "sha256:dd347200af9dbdb9a5f55851d1a0b8b5fb89462b94e84ac0bba89dfec30504fb"
+redisImageDigest = RepoDigest "sha256:86813a7dd3971d9b8088bb34fd894d2cf18a48679d3d8d958a1a0bd4955e6cef"
 
 haskellDevImage :: Text
 haskellDevImage = "ghcr.io/fossas/haskell-dev-tools:9.0.2"

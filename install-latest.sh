@@ -66,6 +66,7 @@ is_supported_platform() {
     darwin/amd64) found=0 ;;
     darwin/arm64) found=0 ;;
     linux/amd64) found=0 ;;
+    linux/arm64) found=0 ;;
   esac
   return $found
 }
@@ -119,7 +120,16 @@ adjust_arch() {
   # adjust archive name based on ARCH
   true
 }
-
+arch_version_check() {
+  # TODO: Make this version correct before merging.
+  if [ "${OS}/${ARCH}" = "linux/arm64" ] && version_less_than "${VERSION}" '3.9.32'
+  then
+    echo "There is no linux/arm64 binary for version $VERSION."
+    echo "Please select a version that is at least version 3.9.32"
+    exit 1
+  fi
+  true
+}
 cat /dev/null <<EOF
 ------------------------------------------------------------------------
 https://github.com/client9/shlib - portable posix shell functions
@@ -257,10 +267,10 @@ http_download_curl() {
   source_url=$2
   header=$3
   if [ -n "$header" ]; then
-    HTTP_CODE=$(curl -w '%{HTTP_CODE}' -sL -H "$header" -H "Cache-Control: no-cache" -o "$local_file" "$source_url") || (log_debug "curl command failed." && return 1)
+    HTTP_CODE=$(curl -w '%{http_code}' -sSL -H "$header" -H "Cache-Control: no-cache" -o "$local_file" "$source_url") || (log_debug "curl command failed." && return 1)
   fi
   if [ -z "$header" ]; then
-    HTTP_CODE=$(curl -w '%{HTTP_CODE}' -sL -H "Cache-Control: no-cache" -o "$local_file" "$source_url") || (log_debug "curl command failed." && return 1)
+    HTTP_CODE=$(curl -w '%{http_code}' -sSL -H "Cache-Control: no-cache" -o "$local_file" "$source_url") || (log_debug "curl command failed." && return 1)
   fi
   return 0
 }
@@ -393,9 +403,10 @@ get_binary_name() {
   name=${PROJECT_NAME}_${VERSION}_${OS}_${ARCH}
   case ${PLATFORM} in
     darwin/arm64)
-      log_info "Platform ${PLATFORM} (m1 silicon) detected, using compatible darwin/amd64 binary instead."
-      name=${PROJECT_NAME}_${VERSION}_${OS}_amd64
-      ;;
+      if version_less_than "$VERSION" "3.9.19"; then
+        log_info "Platform ${PLATFORM} (m1 silicon) detected and requested version < 3.9.19, using compatible darwin/amd64 binary instead."
+        name=${PROJECT_NAME}_${VERSION}_${OS}_amd64
+      fi ;;
   esac
   echo "$name"
 }
@@ -481,6 +492,7 @@ adjust_os
 
 adjust_arch
 
+arch_version_check
 
 NAME=$(get_binary_name)
 TARBALL=${NAME}.${FORMAT}

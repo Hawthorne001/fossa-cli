@@ -35,13 +35,12 @@ import System.FilePath qualified as FP
 newtype CallGraphJarParser = CallGraphJarParser {jar :: BS.ByteString}
   deriving (Eq, Ord, Show)
 
--- This jar is from: https://github.com/fossas/jar-callgraph/pull/1
+-- This jar is from: https://github.com/fossas/jar-callgraph/pull/58
 execJar :: CallGraphJarParser
-execJar = CallGraphJarParser{jar = $(embedFile' "scripts/jar-callgraph-1.0.0.jar")}
+execJar = CallGraphJarParser{jar = $(embedFile' "scripts/jar-callgraph-1.0.2.jar")}
 
 withUnpackedPlugin ::
-  ( Has (Lift IO) sig m
-  ) =>
+  (Has (Lift IO) sig m) =>
   CallGraphJarParser ->
   (FP.FilePath -> m a) ->
   m a

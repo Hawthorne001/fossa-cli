@@ -46,6 +46,7 @@ import App.Fossa.Config.Analyze (
   NoDiscoveryExclusion (NoDiscoveryExclusion),
   ScanDestination (..),
   UnpackArchives (UnpackArchives),
+  WithoutDefaultFilters (..),
  )
 import App.Fossa.Config.Analyze qualified as Config
 import App.Fossa.FirstPartyScan (runFirstPartyScan)
@@ -63,6 +64,7 @@ import App.Fossa.VSIDeps (analyzeVSIDeps)
 import App.Types (
   BaseDir (..),
   FirstPartyScansFlag (..),
+  Mode (..),
   OverrideDynamicAnalysisBinary,
   ProjectRevision (..),
  )
@@ -119,6 +121,7 @@ import Effect.Logger (
  )
 import Effect.ReadFS (ReadFS)
 import Errata (Errata (..))
+import Fossa.API.Types (Organization (Organization, orgSupportsReachability))
 import Path (Abs, Dir, Path, toFilePath)
 import Path.IO (makeRelative)
 import Prettyprinter (
@@ -187,6 +190,7 @@ runDependencyAnalysis ::
   , Has Stack sig m
   , Has (Reader ExperimentalAnalyzeConfig) sig m
   , Has (Reader MavenScopeFilters) sig m
+  , Has (Reader Mode) sig m
   , Has (Reader AllFilters) sig m
   , Has (Reader OverrideDynamicAnalysisBinary) sig m
   , Has Telemetry sig m
@@ -195,23 +199,26 @@ runDependencyAnalysis ::
   Path Abs Dir ->
   -- | Filters
   AllFilters ->
+  Flag WithoutDefaultFilters ->
   -- | An optional path prefix to prepend to paths of discovered manifestFiles
   Maybe FileAncestry ->
   AnalysisTacticTypes ->
   -- | The project to analyze
   DiscoveredProject proj ->
   m ()
-runDependencyAnalysis basedir filters pathPrefix allowedTactics project@DiscoveredProject{..} = do
+runDependencyAnalysis basedir filters withoutDefaultFilters pathPrefix allowedTactics project@DiscoveredProject{..} = do
   let dpi = DiscoveredProjectIdentifier projectPath projectType
-  let hasNonProductionPath = isDefaultNonProductionPath basedir projectPath
+  let hasNonProductionPath =
+        not (fromFlag Config.WithoutDefaultFilters withoutDefaultFilters)
+          && isDefaultNonProductionPath basedir projectPath
 
   case (applyFiltersToProject basedir filters project, hasNonProductionPath) of
     (Nothing, _) -> do
       logInfo $ "Skipping " <> pretty projectType <> " project at " <> viaShow projectPath <> ": no filters matched"
       output $ SkippedDueToProvidedFilter dpi
     (Just _, True) -> do
-      logInfo $ "Skipping " <> pretty projectType <> " project at " <> viaShow projectPath <> " (default non-production path filtering)"
-      output $ SkippedDueToDefaultProductionFilter dpi
+      logInfo $ "Skipping " <> pretty projectType <> " project at " <> viaShow projectPath <> " (default filtering)"
+      output $ SkippedDueToDefaultFilter dpi
     (Just targets, False) -> do
       logInfo $ "Analyzing " <> pretty projectType <> " project at " <> pretty (toFilePath projectPath)
       let ctxMessage = "Project Analysis: " <> showT projectType
@@ -243,17 +250,18 @@ runAnalyzers ::
   ) =>
   AnalysisTacticTypes ->
   AllFilters ->
+  Flag WithoutDefaultFilters ->
   Path Abs Dir ->
   Maybe FileAncestry ->
   m ()
-runAnalyzers allowedTactics filters basedir pathPrefix = do
+runAnalyzers allowedTactics filters withoutDefaultFilters basedir pathPrefix = do
   if filterIsVSIOnly filters
     then do
       logInfo "Running in VSI only mode, skipping other analyzers"
       pure ()
     else traverse_ single discoverFuncs
   where
-    single (DiscoverFunc f) = withDiscoveredProjects f basedir (runDependencyAnalysis basedir filters pathPrefix allowedTactics)
+    single (DiscoverFunc f) = withDiscoveredProjects f basedir (runDependencyAnalysis basedir filters withoutDefaultFilters pathPrefix allowedTactics)
 
 analyze ::
   ( Has Debug sig m
@@ -287,6 +295,7 @@ analyze cfg = Diag.context "fossa-analyze" $ do
       customFossaDepsFile = Config.customFossaDepsFile cfg
       shouldAnalyzePathDependencies = resolvePathDependencies $ Config.experimental cfg
       allowedTactics = Config.allowedTacticTypes cfg
+      withoutDefaultFilters = Config.withoutDefaultFilters cfg
 
   manualSrcUnits <-
     Diag.errorBoundaryIO . diagToDebug $
@@ -296,9 +305,10 @@ analyze cfg = Diag.context "fossa-analyze" $ do
           pure Nothing
         else Diag.context "fossa-deps" . runStickyLogger SevInfo $ analyzeFossaDepsFile basedir customFossaDepsFile maybeApiOpts vendoredDepsOptions
 
-  _ <- case destination of
-    OutputStdout -> pure ()
-    UploadScan apiOpts metadata -> runFossaApiClient apiOpts $ preflightChecks $ AnalyzeChecks revision metadata
+  orgInfo <- case destination of
+    OutputStdout -> pure Nothing
+    UploadScan apiOpts metadata ->
+      fmap Just . runFossaApiClient apiOpts . preflightChecks $ AnalyzeChecks revision metadata
 
   -- additional source units are built outside the standard strategy flow, because they either
   -- require additional information (eg API credentials), or they return additional information (eg user deps).
@@ -353,7 +363,6 @@ analyze cfg = Diag.context "fossa-analyze" $ do
           pure Nothing
         else Diag.context "first-party-scans" . runStickyLogger SevInfo $ runFirstPartyScan basedir maybeApiOpts cfg
   let firstPartyScanResults = join . resultToMaybe $ maybeFirstPartyScanResults
-
   let discoveryFilters = if fromFlag NoDiscoveryExclusion noDiscoveryExclusion then mempty else filters
   (projectScans, ()) <-
     Diag.context "discovery/analysis tasks"
@@ -366,11 +375,12 @@ analyze cfg = Diag.context "fossa-analyze" $ do
       . runReader (Config.mavenScopeFilterSet cfg)
       . runReader discoveryFilters
       . runReader (Config.overrideDynamicAnalysis cfg)
+      . runReader (Config.mode cfg)
       $ do
-        runAnalyzers allowedTactics filters basedir Nothing
+        runAnalyzers allowedTactics filters withoutDefaultFilters basedir Nothing
         when (fromFlag UnpackArchives $ Config.unpackArchives cfg) $
           forkTask $ do
-            res <- Diag.runDiagnosticsIO . diagToDebug . stickyLogStack . withEmptyStack $ Archive.discover (runAnalyzers allowedTactics filters) basedir ancestryDirect
+            res <- Diag.runDiagnosticsIO . diagToDebug . stickyLogStack . withEmptyStack $ Archive.discover (runAnalyzers allowedTactics filters withoutDefaultFilters) basedir ancestryDirect
             Diag.withResult SevError SevWarn res (const (pure ()))
   logDebug $ "Unfiltered project scans: " <> pretty (show projectScans)
 
@@ -400,7 +410,14 @@ analyze cfg = Diag.context "fossa-analyze" $ do
     (False, _) -> traverse (withPathDependencyNudge includeAll) filteredProjects
   logDebug $ "Filtered projects with path dependencies: " <> pretty (show filteredProjects')
 
-  reachabilityUnitsResult <- Diag.context "reachability analysis" . runReader (Config.reachabilityConfig cfg) $ analyzeForReachability projectScans
+  reachabilityUnitsResult <-
+    case orgInfo of
+      (Just (Organization{orgSupportsReachability = False})) -> pure []
+      _ ->
+        Diag.context "reachability analysis"
+          . runReader (Config.reachabilityConfig cfg)
+          . runReader filters
+          $ analyzeForReachability projectScans
   let reachabilityUnits = onlyFoundUnits reachabilityUnitsResult
 
   let analysisResult = AnalysisScanResult projectScans vsiResults binarySearchResults manualSrcUnits dynamicLinkedResults maybeLernieResults reachabilityUnitsResult
@@ -442,7 +459,7 @@ analyze cfg = Diag.context "fossa-analyze" $ do
 
 toProjectResult :: DiscoveredProjectScan -> Maybe ProjectResult
 toProjectResult (SkippedDueToProvidedFilter _) = Nothing
-toProjectResult (SkippedDueToDefaultProductionFilter _) = Nothing
+toProjectResult (SkippedDueToDefaultFilter _) = Nothing
 toProjectResult (Scanned _ res) = resultToMaybe res
 
 analyzeVSI ::

@@ -1,5 +1,167 @@
 # FOSSA CLI Changelog
 
+## 3.9.46
+- Licensing: Fix a bug where the tzdata debian package copyright was not detected as a public domain license ([#1504](https://github.com/fossas/fossa-cli/pull/1504))
+- Container scanning: Fix a bug where Docker URLs were being constructed incorrectly, resulting in a 403 error ([#1500](https://github.com/fossas/fossa-cli/pull/1500))
+
+## 3.9.45
+- Preflight: Fix a bug where the preflight checks fail for SBOM team analysis ([#1499](https://github.com/fossas/fossa-cli/pull/1499))
+
+## 3.9.44
+- Preflight: Fix a bug where the preflight check could fail if you ran fossa multiple times simultaneously ([#1498](https://github.com/fossas/fossa-cli/pull/1498))
+
+## 3.9.43
+- Discovery: Fix a bug where directories in paths.exclude may still be accessed during discovery which causes an error when users don't have permission to read those directories ([#1493](https://github.com/fossas/fossa-cli/pull/1493))
+
+## 3.9.42
+- Licensing: Adds support for the Text-Tabs+Wrap License
+
+## 3.9.41
+- GoModules: Expose a static only analysis method for Go. ([#1468](https://github.com/fossas/fossa-cli/pull/1486))
+
+## 3.9.40
+- Licensing: Fix a bug where license scanner output sometimes included log lines, which breaks JSON parsing
+
+## 3.9.39
+- Licensing: Add the PSF-3.12.7 license. Make a correction to the MulanPSL license. Add a new public-domain rule ([#1480](https://github.com/fossas/fossa-cli/pull/1480))
+
+## 3.9.38
+- Adds clarity to "Invalid project permission" error message, instructing user to specify a team using `fossa analyze --team` or in the `.fossa.yml` file. ([#1475](https://github.com/fossas/fossa-cli/pull/1475))
+- Fixes a small typo in an error heading ([#1476](https://github.com/fossas/fossa-cli/pull/1476))
+- Licensing: Adds support for a handful of new licenses and EULAs (No PR)
+  - ActiPro License Agreement, Versions 2009, 2020, 2021, and 2021-10-28
+  - Authorized Dynatrace Customer Subscription Agreement
+  - Chilkat Software License Agreement
+  - Google Play Core Software Development Kit Terms of Service
+  - Krypton Toolkit Licence Agreement for End-Users
+  - Madshi Software License Agreement
+  - Microsoft SQL Server 2019 Developer, 2019 Evaluation, and 2019 Express
+  - Microsoft SQL Server 2022 Enterprise, Standard, Web
+  - Viskoe.dk Terms of Use
+- Container scanning: Recursively find jars within jars ([#1478](https://github.com/fossas/fossa-cli/pull/1478))
+
+## 3.9.37
+
+- License Scanning: Update Themis to include NOTICE files, and parse the additional NOTICE file fields in Themis's output. ([#1466](https://github.com/fossas/fossa-cli/pull/1466))
+
+## 3.9.36
+
+- fossa-deps: Fixed an issue where Rocky Linux deps were not supported in the fossa-deps file ([#1473](https://github.com/fossas/fossa-cli/pull/1473))
+- `fossa report`: Remove subscription type check in preflight checks ([#1474](https://github.com/fossas/fossa-cli/pull/1474))
+
+## 3.9.35
+
+- Licensing: Add to the list of ignored copyright phrases (No PR)
+
+## 3.9.34
+
+- `--strict`: Users can now enable strict mode for analysis. ([#1463](https://github.com/fossas/fossa-cli/pull/1463))
+
+## 3.9.33
+
+- MSB: Failure to resolve a linked project no longer causes the scan to fail ([[#1469](https://github.com/fossas/fossa-cli/pull/1469)]).
+
+## 3.9.32
+
+- Platform Support: Add a binary for ARM64 Linux environments. ([#1465](https://github.com/fossas/fossa-cli/pull/1465))
+
+## 3.9.31
+
+- Resolve an issue parsing toml configuration files. ([#1459](https://github.com/fossas/fossa-cli/pull/1459))
+- Gradle: ignore deprecated configurations ([#1457](https://github.com/fossas/fossa-cli/pull/1457))
+- Upgrade the GHC we use to build the CLI. ([#1460](https://github.com/fossas/fossa-cli/pull/1460))
+
+## 3.9.30
+
+- Vendored Dependencies: add support for metadata (description, and homepage) for dependencies. ([#1455](https://github.com/fossas/fossa-cli/pull/1455))
+
+## 3.9.29
+- install scripts: Surface curl errors and display http status code correctly. ([#1456](https://github.com/fossas/fossa-cli/pull/1456))
+- Update jar-callgraph version to 1.0.2 [#1454](https://github.com/fossas/fossa-cli/pull/1454)
+
+## 3.9.28
+
+- Container Scanning: Distroless containers will now return results for non-system dependencies. ([#1448](https://github.com/fossas/fossa-cli/pull/1448))
+- Warnings: Remove warnings about native container scanning and Go packages analysis. ([#1446](https://github.com/fossas/fossa-cli/pull/1446))
+
+## 3.9.27
+
+- Tar: Move to the upstream Haskell tar library. FOSSA CLI should now work more reliably when unpacking containers for analysis. ([#1452](https://github.com/fossas/fossa-cli/pull/1452))
+
+## 3.9.26
+
+- Reports: Add `includeCopyrightList` to JSON attribution report request. This will ensure that all copyrights are included in the JSON attribution report once the FOSSA API starts including them. All other formats of attribution reports will receive all copyrights without needing to add this query param. [#1450](https://github.com/fossas/fossa-cli/pull/1450)
+- Resolves an issue where git projects cloned with an url including a username were unable to be found when running `fossa test`. [#1451](https://github.com/fossas/fossa-cli/pull/1451)
+
+## 3.9.25
+
+- Update jar-callgraph version [#1447](https://github.com/fossas/fossa-cli/pull/1447)
+
+## 3.9.24
+
+- Container Scanning: Attempt to find JAR files in container images and report them as dependencies. ([#1442](https://github.com/fossas/fossa-cli/pull/1442), [#1444](https://github.com/fossas/fossa-cli/pull/1444))
+
+## 3.9.23
+
+- Reachability: For organizations that don't have reachability turned on suppress messages about it. ([#1440](https://github.com/fossas/fossa-cli/pull/1440))
+
+## 3.9.22
+- Fixes release group flags for `fossa analyze` and `fossa container analyze`  ([#1439](https://github.com/fossas/fossa-cli/pull/1439))
+
+## 3.9.21
+- Add support for analyzing SBOM files ([#1435](https://github.com/fossas/fossa-cli/pull/1435))
+- License Scanning: Add the Llama-3-community license (No PR)
+- Yarn: Don't fail analysis if a dependency cannot be found. ([1436](https://github.com/fossas/fossa-cli/pull/1436))
+
+## 3.9.20
+- Fixes file matches for license scans ([#1434](https://github.com/fossas/fossa-cli/pull/1434)).
+
+## v3.9.19
+- Release a Mac arm64 binary. ([#1426](https://github.com/fossas/fossa-cli/pull/1426))
+- Updated the license to CPAL, an OSI-approved license similar to MPL ([#1431](https://github.com/fossas/fossa-cli/pull/1431)).
+
+## v3.9.18
+- Resolves an issue where `vendored-dependencies` were rescanned locally, but not in the FOSSA service,
+  when `forceRescans` was set to `true` ([#1423](https://github.com/fossas/fossa-cli/pull/1423)).
+
+## v3.9.17
+- Poetry: Adds partial support for dependency groups. ([#1420](https://github.com/fossas/fossa-cli/pull/1420)).
+
+## v3.9.16
+- Treat `targets` field in the issue summary loaded from Core as optional during `fossa test` and `fossa report` ([#1422](https://github.com/fossas/fossa-cli/pull/1422)).
+- Adds support for SwiftPM v3 files ([#1424](https://github.com/fossas/fossa-cli/pull/1424)).
+  Future SwiftPM file formats will be accepted automatically if they remain backwards compatible with the current parser.
+- Updates parallel embedded binary extractions to be more properly isolated ([#1425](https://github.com/fossas/fossa-cli/pull/1425)).
+
+## v3.9.15
+- Change TLS to a version that takes advantage of but does not require 1.2 with EMS.
+  This will be reverted in six months.
+  On-prem users should upgrade their servers to support either TLS 1.2 with EMS or TLS 1.3.
+  SAAS customers are unaffected. ([#1418](https://github.com/fossas/fossa-cli/pull/1418)).
+
+## v3.9.14
+- Cargo: Update cargo strategy to parse new `cargo metadata` format for cargo >= 1.77.0 ([#1416](https://github.com/fossas/fossa-cli/pull/1416)).
+- `fossa release-group`: Add command to create a FOSSA release group release (`fossa release-group create-release`) [#1409](https://github.com/fossas/fossa-cli/pull/1409).
+- `fossa project`: Adds commands to interact with FOSSA projects (`fossa project edit`) [#1394](https://github.com/fossas/fossa-cli/pull/1395).
+
+## v3.9.13
+- Support GIT dependencies in Bundler projects ([#1403](https://github.com/fossas/fossa-cli/pull/1403/files))
+- Reports: Increase the timeout when hitting the report generation API endpoint ([#1412](https://github.com/fossas/fossa-cli/pull/1412)).
+
+## v3.9.12
+- `--detect-dynamic`: Fix deb tatic parsing ([#1401](https://github.com/fossas/fossa-cli/pull/1401)).
+
+## v3.9.11
+- Licensing: Add new rules for unity licenses. Add the Redis Source Available License.
+
+## v3.9.10
+- Support unarchiving `tgz`, `taz`, `txz`, `tbz`, `tbz2`, and `tz2` files for `--unpack-archives` ([#1402](https://github.com/fossas/fossa-cli/pull/1402/files))
+- `fossa test`: improves diagnostic message ([#1403](https://github.com/fossas/fossa-cli/pull/1403/files))
+- `fossa release-group`: Adds commands to interact with FOSSA release-groups (`fossa release-group add-projects`, `fossa release-group create`, `fossa release-group delete`, `fossa release-group delete-release`) [#1399](https://github.com/fossas/fossa-cli/pull/1399).
+
+## v3.9.9
+- `--without-default-filters`: Users can now disable default path filters ([#1396](https://github.com/fossas/fossa-cli/pull/1396/files)).
+
 ## v3.9.8
 - Reachability: Users may now provide custom locations for the JAR files emitted by projects and used for reachability analysis ([#1382](https://github.com/fossas/fossa-cli/pull/1382)).
 

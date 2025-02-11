@@ -23,6 +23,7 @@ module Control.Carrier.FossaApiClient.Internal.FossaAPIV1 (
   getProject,
   archiveUpload,
   archiveBuildUpload,
+  sbomBuildUpload,
   assertUserDefinedBinaries,
   assertRevisionBinaries,
   licenseScanFinalize,
@@ -42,12 +43,40 @@ module Control.Carrier.FossaApiClient.Internal.FossaAPIV1 (
   alreadyAnalyzedPathRevision,
   getTokenType,
   getCustomBuildUploadPermissions,
+  AnalysisService (..),
+  APIClientEffs,
 
   -- * Reachability
   getReachabilityContentSignedUrl,
   getReachabilityBuildSignedUrl,
   uploadReachabilityContent,
   uploadReachabilityBuild,
+
+  -- * Release Group
+  deleteReleaseGroup,
+  deleteReleaseGroupRelease,
+  getReleaseGroups,
+  getReleaseGroupReleases,
+  updateReleaseGroupRelease,
+  createReleaseGroup,
+  createReleaseGroupRelease,
+
+  -- * Policy
+  getPolicies,
+
+  -- * Team
+  getTeams,
+  addTeamProjects,
+
+  -- * Project
+  updateProject,
+  getProjectV2,
+
+  -- * Revision
+  updateRevision,
+
+  -- * Label
+  getOrgLabels,
 ) where
 
 import App.Docs (fossaSslCertDocsUrl)
@@ -71,21 +100,24 @@ import App.Support (
   requestReportIfPersistsWithDebugBundle,
  )
 import App.Types (
-  FullFileUploads (FullFileUploads),
+  ComponentUploadFileType (..),
+  DependencyRebuild,
+  FileUpload (FileUploadFullContent),
+  LocatorType,
   Policy (..),
   ProjectMetadata (..),
   ProjectRevision (..),
   ReleaseGroupMetadata (releaseGroupName, releaseGroupRelease),
-  fullFileUploadsToCliLicenseScanType,
+  ReleaseGroupReleaseRevision,
+  uploadFileTypeToFetcherName,
  )
 import App.Version (versionNumber)
 import Codec.Compression.GZip qualified as GZIP
-import Container.Errors (EndpointDoesNotSupportNativeContainerScan (EndpointDoesNotSupportNativeContainerScan))
 import Container.Types qualified as NativeContainer
-import Control.Algebra (Algebra, Has, type (:+:))
+import Control.Algebra (type (:+:))
 import Control.Carrier.Empty.Maybe (Empty, EmptyC, runEmpty)
 import Control.Effect.Debug (Debug, debugLog)
-import Control.Effect.Diagnostics (Diagnostics, ToDiagnostic (..), context, fatal, fatalText, fromMaybeText)
+import Control.Effect.Diagnostics (Diagnostics, ToDiagnostic (..), context, errCtx, fatal, fatalText, fromMaybeText, warnOnErr, (<||>))
 import Control.Effect.Empty (empty)
 import Control.Effect.Lift (Lift, sendIO)
 import Control.Exception (Exception (displayException), SomeException)
@@ -103,7 +135,6 @@ import Data.Aeson (
  )
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as BS
-import Data.ByteString.Char8 qualified as C
 import Data.ByteString.Lazy (ByteString)
 import Data.Data (Proxy (Proxy))
 import Data.Error (SourceLocation, createBody, createEmptyBlock, getSourceLocation)
@@ -132,13 +163,13 @@ import Fossa.API.Types (
   AnalyzedPathDependenciesResp,
   ApiOpts,
   Archive,
-  ArchiveComponents (ArchiveComponents),
+  ArchiveComponents (..),
   Build,
   Contributors,
   CustomBuildUploadPermissions,
   Issues,
   OrgId,
-  Organization (Organization, orgRequiresFullFileUploads, orgSupportsIssueDiffs, orgSupportsNativeContainerScan, organizationId),
+  Organization (Organization, orgRequiresFullFileUploads, orgSupportsIssueDiffs, organizationId),
   PathDependencyFinalizeReq (..),
   PathDependencyUpload,
   PathDependencyUploadReq (..),
@@ -150,17 +181,24 @@ import Fossa.API.Types (
   UploadResponse,
   useApiOpts,
  )
+
+import Control.Effect.Reader
+import Data.Foldable (traverse_)
+import Fossa.API.CoreTypes qualified as CoreTypes
 import Network.HTTP.Client (responseStatus)
 import Network.HTTP.Client qualified as C
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Req (
+  DELETE (DELETE),
   GET (GET),
   HttpBody (..),
+  HttpConfig (httpConfigAltManager),
   HttpException (..),
   LbsResponse,
   MonadHttp (..),
   NoReqBody (NoReqBody),
   Option,
+  PATCH (PATCH),
   POST (POST),
   PUT (PUT),
   ReqBodyBs (ReqBodyBs),
@@ -209,10 +247,8 @@ data FossaPublicFacingError = FossaPublicFacingError
 instance FromJSON FossaPublicFacingError where
   parseJSON = withObject "FossaPublicFacingError" $ \v ->
     FossaPublicFacingError
-      <$> v
-        .: "message"
-      <*> v
-        .: "uuid"
+      <$> v .: "message"
+      <*> v .: "uuid"
 
 newtype FossaReq m a = FossaReq {unFossaReq :: m a}
   deriving (Functor, Applicative, Monad, Algebra sig)
@@ -220,8 +256,15 @@ newtype FossaReq m a = FossaReq {unFossaReq :: m a}
 instance Has (Lift IO) sig m => MonadIO (FossaReq m) where
   liftIO = sendIO
 
-instance (Has (Lift IO) sig m, Has Diagnostics sig m) => MonadHttp (FossaReq m) where
-  getHttpConfig = pure httpConfigRetryTimeouts
+setMgrFromReader :: Has (Reader HTTP.Manager) sig m => m HttpConfig
+setMgrFromReader = do
+  mgr <- ask
+  pure httpConfigRetryTimeouts{httpConfigAltManager = Just mgr}
+
+type APIClientEffs sig m = (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m, Has (Reader HTTP.Manager) sig m)
+
+instance APIClientEffs sig m => MonadHttp (FossaReq m) where
+  getHttpConfig = setMgrFromReader
   handleHttpException = FossaReq . fatal . mangleError
 
 newtype FossaReqAllow401 m a = FossaReqAllow401 {unFossaReqAllow401 :: EmptyC m a}
@@ -230,8 +273,11 @@ newtype FossaReqAllow401 m a = FossaReqAllow401 {unFossaReqAllow401 :: EmptyC m 
 instance Has (Lift IO) sig m => MonadIO (FossaReqAllow401 m) where
   liftIO = sendIO
 
-instance (Has (Lift IO) sig m, Has Diagnostics sig m) => MonadHttp (FossaReqAllow401 m) where
-  getHttpConfig = pure httpConfigRetryTimeouts
+instance
+  APIClientEffs sig m =>
+  MonadHttp (FossaReqAllow401 m)
+  where
+  getHttpConfig = setMgrFromReader
   handleHttpException = FossaReqAllow401 . allow401
     where
       allow401 :: HttpException -> EmptyC m a
@@ -249,6 +295,9 @@ instance ToJSON GetAnalyzedRevisionsBody where
       [ "locators" .= getAnalyzedRevisionsBodyLocators
       , "fullFileUploads" .= getAnalyzedRevisionsBodyFullFileUploads
       ]
+
+data AnalysisService = Core | Sparkle
+  deriving (Eq, Ord, Show)
 
 fossaReq :: FossaReq m a -> m a
 fossaReq = unFossaReq
@@ -482,7 +531,7 @@ instance ToDiagnostic FossaError where
           body = createBody (Just content) Nothing (Just $ renderIt requestReportIfPersistsWithDebugBundle) Nothing (Just ctx)
       Errata (Just header) [] (Just body)
     NoResponseDataError ereq -> do
-      let header = "he connection to the FOSSA endpoint was closed without a response"
+      let header = "The connection to the FOSSA endpoint was closed without a response"
           content = renderIt $ reportFossaBugErrorMsg $ fossaEnvironment ereq
           ctx = "Request: " <> renderIt (renderRequest ereq)
           body = createBody (Just content) Nothing (Just $ renderIt requestReportIfPersistsWithDebugBundle) Nothing (Just ctx)
@@ -585,37 +634,42 @@ instance ToDiagnostic FossaError where
           body = createBody (Just content) Nothing (Just $ renderIt reportDefectMsg) Nothing (Just ctx)
       Errata (Just header) [] (Just body)
 
-containerUploadUrl :: Url scheme -> Url scheme
-containerUploadUrl baseurl = baseurl /: "api" /: "container" /: "upload"
+containerUploadUrl :: AnalysisService -> Url scheme -> Url scheme
+containerUploadUrl service baseurl =
+  case service of
+    Core -> baseurl /: "api" /: "container" /: "upload"
+    Sparkle -> baseurl /: "api" /: "proxy" /: "analysis" /: "api" /: "container" /: "upload"
 
 uploadNativeContainerScan ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m, Has (Reader HTTP.Manager) sig m) =>
   ApiOpts ->
   ProjectRevision ->
   ProjectMetadata ->
   NativeContainer.ContainerScan ->
   m UploadResponse
-uploadNativeContainerScan apiOpts ProjectRevision{..} metadata scan = fossaReq $ do
-  supportsNativeScan <- orgSupportsNativeContainerScan <$> getOrganization apiOpts
-  -- Sanity Check!
-  if not supportsNativeScan
-    then fatal (EndpointDoesNotSupportNativeContainerScan getSourceLocation)
-    else do
-      (baseUrl, baseOpts) <- useApiOpts apiOpts
-      let locator = renderLocator $ Locator "custom" projectName (Just projectRevision)
-          opts =
-            "locator"
-              =: locator
-              <> "cliVersion"
-                =: cliVersion
-              <> "managedBuild"
-                =: True
-              <> maybe mempty ("branch" =:) projectBranch
-              <> "scanType"
-                =: ("native" :: Text)
-              <> mkMetadataOpts metadata projectName
-      resp <- req POST (containerUploadUrl baseUrl) (ReqBodyJson scan) jsonResponse (baseOpts <> opts)
-      pure $ responseBody resp
+uploadNativeContainerScan apiOpts ProjectRevision{..} metadata scan =
+  context "Upload Container Scan" . fossaReq $ do
+    (baseUrl, baseOpts) <- useApiOpts apiOpts
+    let locator = renderLocator $ Locator "custom" projectName (Just projectRevision)
+        opts =
+          "locator" =: locator
+            <> "cliVersion" =: cliVersion
+            <> "managedBuild" =: True
+            <> maybe mempty ("branch" =:) projectBranch
+            <> "scanType" =: ("native" :: Text)
+            <> mkMetadataOpts metadata projectName
+
+        uploadScan url containerScan = req POST url (ReqBodyJson containerScan) jsonResponse (baseOpts <> opts)
+        sparkleAnalysisUrl = containerUploadUrl Sparkle baseUrl
+
+    resp <-
+      ( warnOnErr @Text "Container scan upload to new analysis service failed, falling back to core analysis."
+          . errCtx ("Upload to new analysis service at " <> renderUrl sparkleAnalysisUrl)
+          $ uploadScan sparkleAnalysisUrl scan
+      )
+        <||> context "Upload to CORE analysis service" (uploadScan (containerUploadUrl Core baseUrl) scan)
+
+    pure $ responseBody resp
 
 -- | Replacement for @Data.HTTP.Req.req@ that additionally logs information about a request in a debug bundle.
 req ::
@@ -640,7 +694,7 @@ req method url body resp scheme = context "Calling FOSSA API" $
     Req.req method url body resp scheme
 
 uploadAnalysis ::
-  (Has (Lift IO) sig m, Has Diagnostics sig m, Has Debug sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   ProjectRevision ->
   ProjectMetadata ->
@@ -666,7 +720,7 @@ customUploadPermissionUrl :: Url scheme -> Url scheme
 customUploadPermissionUrl baseurl = baseurl /: "api" /: "cli" /: "custom_build_permissions"
 
 getCustomBuildUploadPermissions ::
-  (Has (Lift IO) sig m, Has Diagnostics sig m, Has Debug sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   ProjectRevision ->
   ProjectMetadata ->
@@ -688,13 +742,13 @@ getCustomBuildUploadPermissions apiOpts ProjectRevision{..} metadata = fossaReq 
   pure (responseBody resp)
 
 uploadAnalysisWithFirstPartyLicenses ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m => -- (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
   ApiOpts ->
   ProjectRevision ->
   ProjectMetadata ->
-  FullFileUploads ->
+  FileUpload ->
   m UploadResponse
-uploadAnalysisWithFirstPartyLicenses apiOpts ProjectRevision{..} metadata fullFileUploads = fossaReq $ do
+uploadAnalysisWithFirstPartyLicenses apiOpts ProjectRevision{..} metadata uploadKind = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
 
   let opts =
@@ -705,7 +759,7 @@ uploadAnalysisWithFirstPartyLicenses apiOpts ProjectRevision{..} metadata fullFi
           <> "managedBuild"
             =: True
           <> "cliLicenseScanType"
-            =: (fullFileUploadsToCliLicenseScanType fullFileUploads)
+            =: toText uploadKind
           <> mkMetadataOpts metadata projectName
           -- Don't include branch if it doesn't exist, core may not handle empty string properly.
           <> maybe mempty ("branch" =:) projectBranch
@@ -824,19 +878,17 @@ projectEndpoint :: Url scheme -> OrgId -> Locator -> Url scheme
 projectEndpoint baseurl orgid locator = baseurl /: "api" /: "cli" /: renderLocatorUrl orgid locator /: "project"
 
 getProject ::
-  ( Has (Lift IO) sig m
-  , Has Diagnostics sig m
-  , Has Debug sig m
-  ) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   ProjectRevision ->
+  LocatorType ->
   m Project
-getProject apiopts ProjectRevision{..} = fossaReq $ do
+getProject apiopts ProjectRevision{..} locatorType = fossaReq $ do
   (baseurl, baseopts) <- useApiOpts apiopts
 
   orgid <- organizationId <$> getOrganization apiopts
 
-  let endpoint = projectEndpoint baseurl orgid $ Locator "custom" projectName Nothing
+  let endpoint = projectEndpoint baseurl orgid $ Locator (toText locatorType) projectName Nothing
 
   responseBody <$> req GET endpoint NoReqBody jsonResponse baseopts
 
@@ -848,7 +900,7 @@ getAnalyzedRevisionsEndpoint baseurl = baseurl /: "api" /: "cli" /: "analyzedRev
 -- | getAnalyzedRevisions makes a request to Core with a list of locators that we are considering scanning
 --   Core will respond with a list of locators that have already been analyzed
 getAnalyzedRevisions ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   NonEmpty VendoredDependency ->
   m [Text]
@@ -864,16 +916,17 @@ buildsEndpoint :: Url 'Https -> OrgId -> Locator -> Url 'Https
 buildsEndpoint baseurl orgId locator = baseurl /: "api" /: "cli" /: renderLocatorUrl orgId locator /: "latest_build"
 
 getLatestBuild ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   ProjectRevision ->
+  LocatorType ->
   m Build
-getLatestBuild apiOpts ProjectRevision{..} = fossaReq $ do
+getLatestBuild apiOpts ProjectRevision{..} locatorType = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
 
   orgId <- organizationId <$> getOrganization apiOpts
 
-  response <- req GET (buildsEndpoint baseUrl orgId (Locator "custom" projectName (Just projectRevision))) NoReqBody jsonResponse baseOpts
+  response <- req GET (buildsEndpoint baseUrl orgId (Locator (toText locatorType) projectName (Just projectRevision))) NoReqBody jsonResponse baseOpts
   pure (responseBody response)
 
 ----
@@ -882,7 +935,7 @@ dependencyCacheReadyEndpoint :: Url 'Https -> OrgId -> Locator -> Url 'Https
 dependencyCacheReadyEndpoint baseurl orgId locator = baseurl /: "api" /: "cli" /: renderLocatorUrl orgId locator /: "dependencies-cache" /: "status"
 
 getRevisionDependencyCacheStatus ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   ProjectRevision ->
   m RevisionDependencyCache
@@ -892,31 +945,64 @@ getRevisionDependencyCacheStatus apiOpts ProjectRevision{..} = fossaReq $ do
   response <- req GET (dependencyCacheReadyEndpoint baseUrl orgId (Locator "custom" projectName (Just projectRevision))) NoReqBody jsonResponse baseOpts
   pure (responseBody response)
 
----------- Archive build queueing. This Endpoint ensures that after an archive is uploaded, it is scanned.
+---------- Archive and SBOM build queueing. This Endpoint ensures that after an archive or SBOM is uploaded, it is scanned.
 
 archiveBuildURL :: Url 'Https -> Url 'Https
 archiveBuildURL baseUrl = baseUrl /: "api" /: "components" /: "build"
 
+-- options for archiveBuildUpload and sbomBuildUpload
+data BuildOptions = BuildOptions
+  { isDependency :: Bool
+  , fileType :: ComponentUploadFileType
+  , rebuild :: DependencyRebuild
+  , isRawLicenseScan :: Bool
+  , team :: Maybe Text
+  }
+
 archiveBuildUpload ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
+  ApiOpts ->
+  [Archive] ->
+  DependencyRebuild ->
+  m ()
+archiveBuildUpload apiOpts archives rebuild = context "request build for archives" . context ("rebuild: " <> toText rebuild) $ do
+  -- The API route expects an array of archives, but doesn't properly handle multiple archives.
+  -- Given that, each archive's build is requested one by one.
+  let options = BuildOptions True ArchiveUpload rebuild True Nothing
+  traverse_ (archiveBuildUpload' apiOpts options) archives
+
+sbomBuildUpload ::
+  APIClientEffs sig m =>
   ApiOpts ->
   Archive ->
-  m (Maybe C.ByteString)
-archiveBuildUpload apiOpts archive = runEmpty $
-  fossaReqAllow401 $ do
-    (baseUrl, baseOpts) <- useApiOpts apiOpts
+  Maybe Text ->
+  DependencyRebuild ->
+  m ()
+sbomBuildUpload apiOpts archive team rebuild = context "request build for sbom" . context ("rebuild: " <> toText rebuild) $ do
+  -- The API route expects an array of archives, but doesn't properly handle multiple archives.
+  -- So just pass in the single archive to archiveBuildUpload'
+  let options = BuildOptions False SBOMUpload rebuild False team
+  void $ archiveBuildUpload' apiOpts options archive
 
-    let opts = "dependency" =: True <> "rawLicenseScan" =: True
-    -- The API route expects an array of archives, but doesn't properly handle multiple archives so we upload
-    -- an array of a single archive.
-    -- forceRebuild and fullFiles are ignored by this endpoint. They are only used by the licenseScanFinalize endpoint.
-    let archiveProjects = ArchiveComponents [archive] False $ FullFileUploads False
-    -- The response appears to either be "Created" for new builds, or an error message for existing builds.
-    -- Making the actual return value of "Created" essentially worthless.
-    resp <-
-      context "Queuing a build for all archive uploads" $
-        req POST (archiveBuildURL baseUrl) (ReqBodyJson archiveProjects) bsResponse (baseOpts <> opts)
-    pure (responseBody resp)
+archiveBuildUpload' ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  BuildOptions ->
+  Archive ->
+  m (Maybe ())
+archiveBuildUpload' apiOpts options archive = context ("archive: '" <> toText archive) . runEmpty . fossaReqAllow401 $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+
+  let someOpts = "dependency" =: (isDependency options) <> "rawLicenseScan" =: (isRawLicenseScan options) <> "fileType" =: uploadFileTypeToFetcherName (fileType options)
+  let opts = case (team options) of
+        Nothing -> someOpts
+        Just t -> someOpts <> "team" =: t
+  let archiveProjects = ArchiveComponents [archive] (rebuild options) FileUploadFullContent
+
+  -- The response appears to either be "Created" for new builds, or an error message for existing builds.
+  -- Making the actual return value of "Created" essentially worthless.
+  _ <- context "queue build" $ req POST (archiveBuildURL baseUrl) (ReqBodyJson archiveProjects) bsResponse (baseOpts <> opts)
+  pure ()
 
 ---------- license-scan build queueing. This Endpoint ensures that after a license-scan is uploaded, it is scanned.
 
@@ -924,11 +1010,20 @@ licenseScanFinalizeUrl :: Url 'Https -> Url 'Https
 licenseScanFinalizeUrl baseUrl = baseUrl /: "api" /: "license_scan" /: "finalize"
 
 licenseScanFinalize ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
+  ApiOpts ->
+  ArchiveComponents ->
+  m ()
+licenseScanFinalize apiOpts archiveProjects = do
+  _ <- licenseScanFinalize' apiOpts archiveProjects
+  pure ()
+
+licenseScanFinalize' ::
+  APIClientEffs sig m =>
   ApiOpts ->
   ArchiveComponents ->
   m (Maybe ())
-licenseScanFinalize apiOpts archiveProjects = runEmpty $
+licenseScanFinalize' apiOpts archiveProjects = runEmpty $
   fossaReqAllow401 $ do
     (baseUrl, baseOpts) <- useApiOpts apiOpts
 
@@ -945,15 +1040,16 @@ signedURLEndpoint :: Url 'Https -> Url 'Https
 signedURLEndpoint baseUrl = baseUrl /: "api" /: "components" /: "signed_url"
 
 getSignedURL ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
+  ComponentUploadFileType ->
   Text ->
   Text ->
   m SignedURL
-getSignedURL apiOpts revision packageName = fossaReq $ do
+getSignedURL apiOpts fileType revision packageName = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
 
-  let opts = "packageSpec" =: packageName <> "revision" =: revision
+  let opts = "packageSpec" =: packageName <> "revision" =: revision <> "fileType" =: uploadFileTypeToFetcherName fileType
 
   response <-
     context ("Retrieving a signed S3 URL for " <> packageName) $
@@ -966,7 +1062,7 @@ signedFirstPartyScanURLEndpoint :: Url 'Https -> Url 'Https
 signedFirstPartyScanURLEndpoint baseUrl = baseUrl /: "api" /: "first_party_scan" /: "signed_url"
 
 getSignedFirstPartyScanURL ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   Text ->
   Text ->
@@ -987,7 +1083,7 @@ signedLicenseScanURLEndpoint :: Url 'Https -> Url 'Https
 signedLicenseScanURLEndpoint baseUrl = baseUrl /: "api" /: "license_scan" /: "signed_url"
 
 getSignedLicenseScanURL ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   Text ->
   Text ->
@@ -1005,7 +1101,7 @@ getSignedLicenseScanURL apiOpts revision packageName = fossaReq $ do
 ---------- The archive upload function uploads the file it is given directly to the signed URL it is provided.
 
 archiveUpload ::
-  (Has (Lift IO) sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   SignedURL ->
   FilePath ->
   m ByteString
@@ -1025,7 +1121,7 @@ archiveUpload signedArcURI arcFile = fossaReq $ do
 ---------- The license scan result upload function uploads the JSON license result directly to the signed URL it is provided.
 
 licenseScanResultUpload ::
-  (Has (Lift IO) sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   SignedURL ->
   LicenseSourceUnit ->
   m LbsResponse
@@ -1048,7 +1144,7 @@ licenseScanResultUpload signedUploadURI licenseScanResult = fossaReq $ do
 ---------- The first-party scan result upload function uploads the JSON license result directly to the signed URL it is provided.
 
 firstPartyScanResultUpload ::
-  (Has (Lift IO) sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   SignedURL ->
   NE.NonEmpty FullSourceUnit ->
   m LbsResponse
@@ -1095,12 +1191,13 @@ issuesEndpoint :: Url 'Https -> OrgId -> Locator -> Url 'Https
 issuesEndpoint baseUrl orgId locator = baseUrl /: "api" /: "cli" /: renderLocatorUrl orgId locator /: "issues"
 
 getIssues ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   ProjectRevision ->
   Maybe DiffRevision ->
+  LocatorType ->
   m Issues
-getIssues apiOpts ProjectRevision{..} diffRevision = fossaReq $ do
+getIssues apiOpts ProjectRevision{..} diffRevision locatorType = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
   org <- getOrganization apiOpts
 
@@ -1112,7 +1209,7 @@ getIssues apiOpts ProjectRevision{..} diffRevision = fossaReq $ do
   response <-
     req
       GET
-      (issuesEndpoint baseUrl (organizationId org) (Locator "custom" projectName (Just projectRevision)))
+      (issuesEndpoint baseUrl (organizationId org) (Locator (toText locatorType) projectName (Just projectRevision)))
       NoReqBody
       jsonResponse
       opts
@@ -1145,7 +1242,7 @@ attributionEndpoint baseurl orgId locator format = appendSegment format $ baseur
         ReportCSV -> input /: "full" /: "CSV"
 
 getAttributionJson ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   ProjectRevision ->
   m Attr.Attribution
@@ -1161,12 +1258,16 @@ getAttributionJson apiOpts ProjectRevision{..} = fossaReq $ do
             =: True
           <> "dependencyInfoOptions[]"
             =: packageDownloadUrl
+          <> "includeCopyrightList"
+            =: True
+          -- Large reports can take over a minute to generate, so increase the timeout to 10 minutes
+          <> responseTimeoutSeconds 600
   orgId <- organizationId <$> getOrganization apiOpts
   response <- req GET (attributionEndpoint baseUrl orgId (Locator "custom" projectName (Just projectRevision)) ReportJson) NoReqBody jsonResponse opts
   pure (responseBody response)
 
 getAttribution ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   ProjectRevision ->
   ReportOutputFormat ->
@@ -1175,7 +1276,9 @@ getAttribution apiOpts revision ReportJson = fossaReq $ do
   jsonValue <- getAttributionJson apiOpts revision
   pure . decodeUtf8 $ Aeson.encode jsonValue
 getAttribution apiOpts ProjectRevision{..} format = fossaReq $ do
-  (baseUrl, opts) <- useApiOpts apiOpts
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  -- Large reports can take over a minute to generate, so increase the timeout to 10 minutes
+  let opts = baseOpts <> responseTimeoutSeconds 600
 
   orgId <- organizationId <$> getOrganization apiOpts
   response <- req GET (attributionEndpoint baseUrl orgId (Locator "custom" projectName (Just projectRevision)) format) NoReqBody bsResponse opts
@@ -1186,7 +1289,7 @@ getAttribution apiOpts ProjectRevision{..} format = fossaReq $ do
 organizationEndpoint :: Url scheme -> Url scheme
 organizationEndpoint baseurl = baseurl /: "api" /: "cli" /: "organization"
 
-getOrganization :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> m Organization
+getOrganization :: APIClientEffs sig m => ApiOpts -> m Organization
 getOrganization apiOpts = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
   responseBody <$> req GET (organizationEndpoint baseUrl) NoReqBody jsonResponse baseOpts
@@ -1196,7 +1299,7 @@ getOrganization apiOpts = fossaReq $ do
 tokenTypeEndpoint :: Url scheme -> Url scheme
 tokenTypeEndpoint baseurl = baseurl /: "api" /: "cli" /: "token_type"
 
-getTokenType :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> m TokenTypeResponse
+getTokenType :: APIClientEffs sig m => ApiOpts -> m TokenTypeResponse
 getTokenType apiOpts = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
   responseBody <$> req GET (tokenTypeEndpoint baseUrl) NoReqBody jsonResponse baseOpts
@@ -1204,7 +1307,7 @@ getTokenType apiOpts = fossaReq $ do
 contributorsEndpoint :: Url scheme -> Url scheme
 contributorsEndpoint baseurl = baseurl /: "api" /: "contributors"
 
-uploadContributors :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> Text -> Contributors -> m ()
+uploadContributors :: APIClientEffs sig m => ApiOpts -> Text -> Contributors -> m ()
 uploadContributors apiOpts locator contributors = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
 
@@ -1251,7 +1354,7 @@ instance ToJSON UserDefinedAssertionBody where
 assertUserDefinedBinariesEndpoint :: Url scheme -> Url scheme
 assertUserDefinedBinariesEndpoint baseurl = baseurl /: "api" /: "iat" /: "binary"
 
-assertUserDefinedBinaries :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> IAT.UserDefinedAssertionMeta -> [Fingerprint Raw] -> m ()
+assertUserDefinedBinaries :: APIClientEffs sig m => ApiOpts -> IAT.UserDefinedAssertionMeta -> [Fingerprint Raw] -> m ()
 assertUserDefinedBinaries apiOpts IAT.UserDefinedAssertionMeta{..} fingerprints = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
   let body = UserDefinedAssertionBody assertedName assertedVersion assertedLicense assertedDescription assertedUrl (FingerprintAssertion <$> fingerprints)
@@ -1261,7 +1364,7 @@ assertUserDefinedBinaries apiOpts IAT.UserDefinedAssertionMeta{..} fingerprints 
 assertRevisionBinariesEndpoint :: Url scheme -> Locator -> Url scheme
 assertRevisionBinariesEndpoint baseurl locator = baseurl /: "api" /: "iat" /: "binary" /: renderLocator locator
 
-assertRevisionBinaries :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> Locator -> [Fingerprint Raw] -> m ()
+assertRevisionBinaries :: APIClientEffs sig m => ApiOpts -> Locator -> [Fingerprint Raw] -> m ()
 assertRevisionBinaries apiOpts locator fingerprints = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
   let body = FingerprintAssertion <$> fingerprints
@@ -1271,7 +1374,7 @@ assertRevisionBinaries apiOpts locator fingerprints = fossaReq $ do
 resolveUserDefinedBinaryEndpoint :: Url scheme -> IAT.UserDep -> Url scheme
 resolveUserDefinedBinaryEndpoint baseurl dep = baseurl /: "api" /: "iat" /: "resolve" /: "user-defined" /: IAT.renderUserDep dep
 
-resolveUserDefinedBinary :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> IAT.UserDep -> m IAT.UserDefinedAssertionMeta
+resolveUserDefinedBinary :: APIClientEffs sig m => ApiOpts -> IAT.UserDep -> m IAT.UserDefinedAssertionMeta
 resolveUserDefinedBinary apiOpts dep = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
   responseBody <$> req GET (resolveUserDefinedBinaryEndpoint baseUrl dep) NoReqBody jsonResponse baseOpts
@@ -1286,7 +1389,7 @@ instance FromJSON ResolvedDependency where
 resolveProjectDependenciesEndpoint :: Url scheme -> VSI.Locator -> Url scheme
 resolveProjectDependenciesEndpoint baseurl locator = baseurl /: "api" /: "revisions" /: VSI.renderLocator locator /: "dependencies"
 
-resolveProjectDependencies :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> VSI.Locator -> m [VSI.Locator]
+resolveProjectDependencies :: APIClientEffs sig m => ApiOpts -> VSI.Locator -> m [VSI.Locator]
 resolveProjectDependencies apiOpts locator = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
 
@@ -1337,7 +1440,7 @@ instance FromJSON VSICreateScanResponseBody where
 vsiCreateScanEndpoint :: Url scheme -> Url scheme
 vsiCreateScanEndpoint baseurl = baseVsiUrl baseurl /: "scans"
 
-vsiCreateScan :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> ProjectRevision -> m VSI.ScanID
+vsiCreateScan :: APIClientEffs sig m => ApiOpts -> ProjectRevision -> m VSI.ScanID
 vsiCreateScan apiOpts ProjectRevision{..} = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
 
@@ -1356,7 +1459,7 @@ instance ToJSON VSIAddFilesToScanRequestBody where
 vsiAddFilesToScanEndpoint :: Url scheme -> VSI.ScanID -> Url scheme
 vsiAddFilesToScanEndpoint baseurl (VSI.ScanID scanID) = baseVsiUrl baseurl /: "scans" /: scanID /: "files"
 
-vsiAddFilesToScan :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> VSI.ScanID -> Map (Path Rel File) Fingerprint.Combined -> m ()
+vsiAddFilesToScan :: APIClientEffs sig m => ApiOpts -> VSI.ScanID -> Map (Path Rel File) Fingerprint.Combined -> m ()
 vsiAddFilesToScan apiOpts scanID files = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
 
@@ -1390,7 +1493,7 @@ instance ToJSON VSICompleteScanRequestBody where
 vsiCompleteScanEndpoint :: Url scheme -> VSI.ScanID -> Url scheme
 vsiCompleteScanEndpoint baseurl (VSI.ScanID scanID) = baseVsiUrl baseurl /: "scans" /: scanID /: "complete"
 
-vsiCompleteScan :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> VSI.ScanID -> m ()
+vsiCompleteScan :: APIClientEffs sig m => ApiOpts -> VSI.ScanID -> m ()
 vsiCompleteScan apiOpts scanID = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
 
@@ -1414,7 +1517,7 @@ instance FromJSON VSIScanAnalysisStatusBody where
 vsiScanAnalysisStatusEndpoint :: Url scheme -> VSI.ScanID -> Url scheme
 vsiScanAnalysisStatusEndpoint baseurl (VSI.ScanID scanID) = baseVsiUrl baseurl /: "scans" /: scanID /: "status" /: "analysis"
 
-vsiScanAnalysisStatus :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> VSI.ScanID -> m VSI.AnalysisStatus
+vsiScanAnalysisStatus :: APIClientEffs sig m => ApiOpts -> VSI.ScanID -> m VSI.AnalysisStatus
 vsiScanAnalysisStatus apiOpts scanID = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
   body <- responseBody <$> req GET (vsiScanAnalysisStatusEndpoint baseUrl scanID) NoReqBody jsonResponse baseOpts
@@ -1423,7 +1526,7 @@ vsiScanAnalysisStatus apiOpts scanID = fossaReq $ do
 vsiDownloadInferencesEndpoint :: Url scheme -> VSI.ScanID -> Url scheme
 vsiDownloadInferencesEndpoint baseurl (VSI.ScanID scanID) = baseVsiUrl baseurl /: "scans" /: scanID /: "inferences"
 
-vsiDownloadInferences :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> VSI.ScanID -> m VSI.VsiExportedInferencesBody
+vsiDownloadInferences :: APIClientEffs sig m => ApiOpts -> VSI.ScanID -> m VSI.VsiExportedInferencesBody
 vsiDownloadInferences apiOpts scanID = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
   responseBody <$> req GET (vsiDownloadInferencesEndpoint baseUrl scanID) NoReqBody jsonResponse baseOpts
@@ -1436,7 +1539,7 @@ newtype AppManifest = AppManifest {endpointAppVersion :: Text} deriving (Show, E
 instance FromXML AppManifest where
   parseElement el = AppManifest <$> child "version" el
 
-getEndpointVersion :: (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) => ApiOpts -> m Text
+getEndpointVersion :: APIClientEffs sig m => ApiOpts -> m Text
 getEndpointVersion apiOpts = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
   body <- responseBody <$> req GET (endpointAppManifest baseUrl) NoReqBody bsResponse baseOpts
@@ -1450,17 +1553,17 @@ signedLicenseScanPathDependencyURLEndpoint :: Url 'Https -> Url 'Https
 signedLicenseScanPathDependencyURLEndpoint baseUrl = baseUrl /: "api" /: "cli" /: "path_dependency_scan" /: "upload"
 
 getUploadURLForPathDependency ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   Text ->
   Text ->
   ProjectRevision ->
-  FullFileUploads ->
+  FileUpload ->
   m PathDependencyUpload
-getUploadURLForPathDependency apiOpts path version ProjectRevision{..} fullFileUpload = fossaReq $ do
+getUploadURLForPathDependency apiOpts path version ProjectRevision{..} upload = fossaReq $ do
   (baseUrl, baseOpts) <- useApiOpts apiOpts
   let projectLocator = Locator "custom" projectName (Just projectRevision)
-  let req' = PathDependencyUploadReq path version projectLocator fullFileUpload
+  let req' = PathDependencyUploadReq path version projectLocator upload
   response <-
     context ("Retrieving a signed S3 URL for license scan results of " <> path) $
       req POST (signedLicenseScanPathDependencyURLEndpoint baseUrl) (ReqBodyJson req') jsonResponse baseOpts
@@ -1470,7 +1573,7 @@ pathDependencyFinalizeUrl :: Url 'Https -> Url 'Https
 pathDependencyFinalizeUrl baseUrl = baseUrl /: "api" /: "cli" /: "path_dependency_scan" /: "finalize"
 
 finalizePathDependencyScan ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   [Locator] ->
   Bool ->
@@ -1488,7 +1591,7 @@ alreadyAnalyzedPathRevisionURLEndpoint :: Url 'Https -> Locator -> Url 'Https
 alreadyAnalyzedPathRevisionURLEndpoint baseUrl locator = baseUrl /: "api" /: "cli" /: "path_dependency_scan" /: renderLocator locator /: "analyzed"
 
 alreadyAnalyzedPathRevision ::
-  (Has (Lift IO) sig m, Has Debug sig m, Has Diagnostics sig m) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   ProjectRevision ->
   m (AnalyzedPathDependenciesResp)
@@ -1510,10 +1613,7 @@ signedReachabilityBuildURLEndpoint :: Url 'Https -> Url 'Https
 signedReachabilityBuildURLEndpoint baseUrl = baseUrl /: "api" /: "cli" /: "reachability" /: "build" /: "upload"
 
 getReachabilityContentSignedUrl ::
-  ( Has (Lift IO) sig m
-  , Has Debug sig m
-  , Has Diagnostics sig m
-  ) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   Map Text Text ->
   m SignedURLWithKey
@@ -1525,10 +1625,7 @@ getReachabilityContentSignedUrl apiOpts metadata = fossaReq $ do
   pure (responseBody response)
 
 getReachabilityBuildSignedUrl ::
-  ( Has (Lift IO) sig m
-  , Has Debug sig m
-  , Has Diagnostics sig m
-  ) =>
+  APIClientEffs sig m =>
   ApiOpts ->
   ProjectRevision ->
   ProjectMetadata ->
@@ -1545,10 +1642,7 @@ getReachabilityBuildSignedUrl apiOpts ProjectRevision{..} metadata = fossaReq $ 
   pure (responseBody response)
 
 uploadReachabilityBuild ::
-  ( Has (Lift IO) sig m
-  , Has Diagnostics sig m
-  , ToJSON a
-  ) =>
+  (APIClientEffs sig m, ToJSON a) =>
   SignedURL ->
   a ->
   m LbsResponse
@@ -1569,9 +1663,7 @@ uploadReachabilityBuild signedUrl content = fossaReq $ do
     uploadReq url options = reqCb PUT url (ReqBodyBs encoded) lbsResponse options (pure . requestEncoder)
 
 uploadReachabilityContent ::
-  ( Has (Lift IO) sig m
-  , Has Diagnostics sig m
-  ) =>
+  APIClientEffs sig m =>
   SignedURLWithKey ->
   ByteString ->
   m (Text)
@@ -1596,3 +1688,206 @@ uploadReachabilityContent signedUrl bs = fossaReq $ do
         lbsResponse
         options
         (pure . requestEncoder)
+
+policiesURLEndpoint :: Url 'Https -> Url 'Https
+policiesURLEndpoint baseUrl = baseUrl /: "api" /: "policies"
+
+getPolicies ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  m [CoreTypes.Policy]
+getPolicies apiOpts = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Retrieving policies" $
+      req GET (policiesURLEndpoint baseUrl) NoReqBody jsonResponse baseOpts
+  pure (responseBody resp)
+
+teamsURLEndpoint :: Url 'Https -> Url 'Https
+teamsURLEndpoint baseUrl = baseUrl /: "api" /: "teams"
+
+getTeams ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  m [CoreTypes.Team]
+getTeams apiOpts = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Retrieving teams" $
+      req GET (teamsURLEndpoint baseUrl) NoReqBody jsonResponse baseOpts
+  pure (responseBody resp)
+
+addTeamProjectsURLEndpoint :: Url 'Https -> Text -> Url 'Https
+addTeamProjectsURLEndpoint baseUrl teamId = baseUrl /: "api" /: "teams" /: teamId /: "projects"
+
+addTeamProjects ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  Int ->
+  CoreTypes.AddTeamProjectsRequest ->
+  m CoreTypes.AddTeamProjectsResponse
+addTeamProjects apiOpts teamId addProjectsReq = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Adding projects to team" $
+      req PUT (addTeamProjectsURLEndpoint baseUrl $ toText teamId) (ReqBodyJson addProjectsReq) jsonResponse baseOpts
+  pure (responseBody resp)
+
+deleteReleaseGroupURLEndpoint :: Url 'Https -> Text -> Url 'Https
+deleteReleaseGroupURLEndpoint baseUrl releaseGroupId = baseUrl /: "api" /: "project_group" /: releaseGroupId
+
+deleteReleaseGroup ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  Int ->
+  m ()
+deleteReleaseGroup apiOpts releaseGroupId = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  void $
+    context "Deleting release group" $
+      req DELETE (deleteReleaseGroupURLEndpoint baseUrl $ toText releaseGroupId) NoReqBody ignoreResponse baseOpts
+
+specifiedReleaseGroupReleaseURLEndpoint :: Url 'Https -> Text -> Text -> Url 'Https
+specifiedReleaseGroupReleaseURLEndpoint baseUrl releaseGroupId releaseId = baseUrl /: "api" /: "project_group" /: releaseGroupId /: "release" /: releaseId
+
+deleteReleaseGroupRelease ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  Int ->
+  Int ->
+  m ()
+deleteReleaseGroupRelease apiOpts releaseGroupId releaseId = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  void $
+    context "Deleting release group release" $
+      req DELETE (specifiedReleaseGroupReleaseURLEndpoint baseUrl (toText releaseGroupId) $ toText releaseId) NoReqBody ignoreResponse baseOpts
+
+updateReleaseGroupRelease ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  Int ->
+  Int ->
+  CoreTypes.UpdateReleaseRequest ->
+  m CoreTypes.ReleaseGroupRelease
+updateReleaseGroupRelease apiOpts releaseGroupId releaseId updateReq = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Updating release group release" $
+      req PUT (specifiedReleaseGroupReleaseURLEndpoint baseUrl (toText releaseGroupId) $ toText releaseId) (ReqBodyJson updateReq) jsonResponse baseOpts
+  pure (responseBody resp)
+
+releaseGroupURLEndpoint :: Url 'Https -> Url 'Https
+releaseGroupURLEndpoint baseUrl = baseUrl /: "api" /: "project_group"
+
+createReleaseGroup ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  CoreTypes.CreateReleaseGroupRequest ->
+  m CoreTypes.CreateReleaseGroupResponse
+createReleaseGroup apiOpts createReleaseGroupReq = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Creating release group" $
+      req POST (releaseGroupURLEndpoint baseUrl) (ReqBodyJson createReleaseGroupReq) jsonResponse baseOpts
+  pure (responseBody resp)
+
+getReleaseGroups ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  m [CoreTypes.ReleaseGroup]
+getReleaseGroups apiOpts = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Retrieving release groups" $
+      req GET (releaseGroupURLEndpoint baseUrl) NoReqBody jsonResponse baseOpts
+  pure (responseBody resp)
+
+releaseGroupReleaseURLEndpoint :: Url 'Https -> Text -> Url 'Https
+releaseGroupReleaseURLEndpoint baseUrl releaseGroupId = baseUrl /: "api" /: "project_group" /: releaseGroupId /: "release"
+
+getReleaseGroupReleases ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  Int ->
+  m [CoreTypes.ReleaseGroupRelease]
+getReleaseGroupReleases apiOpts releaseGroupId = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Retrieving release group releases" $
+      req GET (releaseGroupReleaseURLEndpoint baseUrl $ toText releaseGroupId) NoReqBody jsonResponse baseOpts
+  pure (responseBody resp)
+
+createReleaseGroupRelease ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  Int ->
+  ReleaseGroupReleaseRevision ->
+  m CoreTypes.ReleaseGroupRelease
+createReleaseGroupRelease apiOpts releaseGroupId createReleaseReq = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Creating release group release" $
+      req POST (releaseGroupReleaseURLEndpoint baseUrl $ toText releaseGroupId) (ReqBodyJson createReleaseReq) jsonResponse baseOpts
+  pure (responseBody resp)
+
+updateProjectURLEndpoint :: Url 'Https -> Text -> Url 'Https
+updateProjectURLEndpoint baseUrl locator = baseUrl /: "api" /: "projects" /: locator
+
+updateProject ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  Text ->
+  CoreTypes.UpdateProjectRequest ->
+  m CoreTypes.Project
+updateProject apiOpts locator updateReq = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Updating project" $
+      req PUT (updateProjectURLEndpoint baseUrl locator) (ReqBodyJsonCompat updateReq) jsonResponse baseOpts
+  pure (responseBody resp)
+
+updateRevisionURLEndpoint :: Url 'Https -> Text -> Url 'Https
+updateRevisionURLEndpoint baseUrl revisionLocator = baseUrl /: "api" /: "revisions" /: revisionLocator
+
+updateRevision ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  Text ->
+  CoreTypes.UpdateRevisionRequest ->
+  m CoreTypes.Revision
+updateRevision apiOpts revisionLocator updateReq = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Updating revision" $
+      req PATCH (updateRevisionURLEndpoint baseUrl revisionLocator) (ReqBodyJson updateReq) jsonResponse baseOpts
+  pure (responseBody resp)
+
+-- Get project using Core's main endpoint
+getProjectV2URLEndpoint :: Url 'Https -> Text -> Url 'Https
+getProjectV2URLEndpoint baseUrl locator = baseUrl /: "api" /: "projects" /: locator
+
+getProjectV2 ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  Text ->
+  m CoreTypes.Project
+getProjectV2 apiOpts locator = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Get project" $
+      req GET (getProjectV2URLEndpoint baseUrl locator) NoReqBody jsonResponse baseOpts
+  pure (responseBody resp)
+
+getOrgLabelsURLEndpoint :: Url 'Https -> Url 'Https
+getOrgLabelsURLEndpoint baseUrl = baseUrl /: "api" /: "organizations" /: "labels"
+
+getOrgLabels ::
+  APIClientEffs sig m =>
+  ApiOpts ->
+  m CoreTypes.Labels
+getOrgLabels apiOpts = fossaReq $ do
+  (baseUrl, baseOpts) <- useApiOpts apiOpts
+  resp <-
+    context "Retrieving organization labels" $
+      req GET (getOrgLabelsURLEndpoint baseUrl) NoReqBody jsonResponse baseOpts
+  pure (responseBody resp)

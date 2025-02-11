@@ -13,7 +13,8 @@
                 "oraclelinux",
                 "busybox",
                 "sles",
-                "fedora"
+                "fedora",
+                "rocky"
             ],
             "description": "Name of the distribution OS."
         },
@@ -212,6 +213,19 @@
                 "version": {
                     "type": "string",
                     "description": "Version of the dependency. This will be the version associated with this vendored dependency in FOSSA's dashboard"
+                },
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Description of the dependency (if any)"
+                        },
+                        "homepage": {
+                            "type": "string",
+                            "description": "Homepage of the dependency. This should be web address."
+                        }
+                    }
                 }
             },
             "required": [

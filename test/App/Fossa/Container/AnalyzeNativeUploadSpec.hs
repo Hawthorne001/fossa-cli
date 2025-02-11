@@ -22,14 +22,14 @@ spec = do
       GetOrganization `alwaysReturns` org
       GetApiOpts `alwaysReturns` Fixtures.apiOpts
       expectUploadSuccess
-      locator <- uploadScan fixtureRevision fixtureProjectMetadata (fixtureJsonOutput False) fixtureContainerScan
+      locator <- uploadScan org fixtureRevision fixtureProjectMetadata (fixtureJsonOutput False) fixtureContainerScan
       locator `shouldBe'` expectedLocator
 
     it' "should fail uploading native container scan, when org does not supports native container scanning" $ do
       let org = Fixtures.organization{orgSupportsNativeContainerScan = False}
       GetOrganization `alwaysReturns` org
       GetApiOpts `alwaysReturns` Fixtures.apiOpts
-      expectFatal' $ uploadScan fixtureRevision fixtureProjectMetadata (fixtureJsonOutput False) fixtureContainerScan
+      expectFatal' $ uploadScan org fixtureRevision fixtureProjectMetadata (fixtureJsonOutput False) fixtureContainerScan
 
     -- As with the version of this test for App.Fossa.Analyze.UploadSpec, this
     -- is just checking it doesn't fail.
@@ -38,14 +38,14 @@ spec = do
       GetOrganization `alwaysReturns` org
       GetApiOpts `alwaysReturns` Fixtures.apiOpts
       expectUploadSuccess
-      locator <- uploadScan fixtureRevision fixtureProjectMetadata (fixtureJsonOutput True) fixtureContainerScan
+      locator <- uploadScan org fixtureRevision fixtureProjectMetadata (fixtureJsonOutput True) fixtureContainerScan
       locator `shouldBe'` expectedLocator
 
 fixtureProjectMetadata :: ProjectMetadata
 fixtureProjectMetadata = ProjectMetadata Nothing Nothing Nothing Nothing Nothing Nothing ["label-1", "label-2"] Nothing
 
 fixtureContainerScan :: ContainerScan
-fixtureContainerScan = ContainerScan (ContainerScanImage "alpine" "3.1.4" []) "some-digest" "some-tag"
+fixtureContainerScan = ContainerScan (ContainerScanImage (Just "alpine") (Just "3.1.4") []) "some-digest" "some-tag"
 
 fixtureRevision :: ProjectRevision
 fixtureRevision = ProjectRevision "some-tag" "some-digest" $ Just "master"
